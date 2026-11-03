@@ -6,3 +6,6 @@
 !public/**
 !test/
 !test/**
+!*.sh
+!Dockerfile
+!.dockerignore
