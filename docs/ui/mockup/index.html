@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>云响 · 界面设计预览</title>
+<style>
+  :root{
+    --bg:#0b0e12;--surface:rgba(24,29,36,.82);--line:rgba(255,255,255,.09);
+    --ink:#f3f6f8;--muted:#8d99a6;--accent:#3b82f6;--good:#34d399;--warn:#fbbf24;--bad:#fb7185;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:#07090c;color:var(--ink)}
+  button,input{font:inherit}
+  .switcher{position:sticky;top:0;z-index:9;display:flex;gap:8px;align-items:center;padding:12px 20px;background:#10141aee;border-bottom:1px solid var(--line);backdrop-filter:blur(16px)}
+  .switcher b{font-size:12px;letter-spacing:.12em;color:var(--muted);margin-right:8px}
+  .switcher button{border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:999px;padding:8px 14px;cursor:pointer}
+  .switcher button.on{background:rgba(59,130,246,.18);color:#dbeafe;border-color:rgba(59,130,246,.5)}
+  .app{width:min(1440px,100%);min-height:calc(100vh - 57px);margin:0 auto;display:flex;background:
+    radial-gradient(820px 360px at 0 -10%,rgba(59,130,246,.18),transparent 60%),
+    radial-gradient(640px 280px at 100% 0,rgba(52,211,153,.08),transparent 55%),var(--bg)}
+  .side{width:236px;flex:none;padding:20px 12px;border-right:1px solid var(--line);background:rgba(10,13,17,.55);display:flex;flex-direction:column}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:750;font-size:18px;padding:2px 10px 8px}
+  .logo{width:32px;height:32px;border-radius:10px;display:grid;place-items:center;background:linear-gradient(135deg,#22d3ee,#3b82f6);color:#041018;font-weight:800}
+  .online{color:#6ee7b7;font-size:12px;padding:0 10px 14px}
+  .g{font-size:11px;letter-spacing:.14em;color:#667584;padding:16px 12px 6px}
+  .nav{width:100%;display:flex;align-items:center;gap:10px;border:0;background:transparent;color:#d5dee6;text-align:left;border-radius:10px;padding:11px 12px;margin:2px 0;cursor:pointer}
+  .nav.on{background:rgba(59,130,246,.14);color:#dbeafe;box-shadow:inset 3px 0 0 var(--accent)}
+  .foot{margin-top:auto;color:#f0a8a2;padding:14px 12px}
+  .main{flex:1;min-width:0}
+  .top{height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;border-bottom:1px solid var(--line);color:var(--muted);font-size:13px}
+  .top i{color:#4c5964;font-style:normal;margin:0 8px}
+  .tools{display:flex;align-items:center;gap:8px}
+  .icon,.avatar{width:34px;height:34px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--ink);display:grid;place-items:center}
+  .avatar{border-radius:50%;background:#eef3f7;color:#111;font-weight:700;border:0}
+  .page{padding:26px 28px 40px;max-width:1120px}
+  .kicker{font-size:11px;letter-spacing:.16em;color:#7dd3fc;font-weight:700}
+  h1{font-size:30px;margin:8px 0 6px;letter-spacing:-.4px}
+  .sub{color:var(--muted);margin:0 0 18px;line-height:1.7}
+  .row{display:flex;justify-content:space-between;gap:16px;align-items:center}
+  .btn{border:0;border-radius:10px;background:var(--accent);color:#fff;font-weight:700;padding:11px 16px;cursor:pointer}
+  .ghost{background:rgba(255,255,255,.04);color:var(--ink);border:1px solid var(--line)}
+  .card,.panel{background:var(--surface);border:1px solid var(--line);border-radius:16px;backdrop-filter:blur(18px)}
+  .card{padding:18px}
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:8px 0 16px}
+  .card small{color:var(--muted)}
+  .card strong{display:block;font-size:30px;margin:12px 0 6px;font-variant-numeric:tabular-nums}
+  .good{color:var(--good)} .warn{color:var(--warn)}
+  .panel{overflow:hidden;margin-top:14px}
+  .panel h2{font-size:15px;margin:0;padding:16px 18px;border-bottom:1px solid var(--line)}
+  .pill{display:inline-flex;align-items:center;height:24px;padding:0 10px;border-radius:999px;font-size:12px;font-weight:700}
+  .ok{background:rgba(52,211,153,.14);color:var(--good)}
+  .wait{background:rgba(251,191,36,.14);color:var(--warn)}
+  .who{display:inline-flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:999px;padding:6px 10px 6px 6px;background:rgba(255,255,255,.04)}
+  .sum{display:grid;grid-template-columns:1.3fr .7fr .7fr;padding:8px 18px 4px}
+  .sum strong{font-size:28px}
+  .model,.rec{margin:10px 18px;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.035);display:flex;justify-content:space-between;gap:12px;align-items:center}
+  .day{margin:0 18px 14px;padding-left:12px;border-left:2px solid rgba(59,130,246,.45)}
+  .day div{display:flex;justify-content:space-between;padding:7px 0;color:#d7e0e7}
+  .seg{display:flex;gap:8px;margin:8px 0 4px}
+  .seg button{border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--muted);border-radius:10px;padding:9px 12px}
+  .seg button.on{color:#dbeafe;border-color:rgba(59,130,246,.5);background:rgba(59,130,246,.14)}
+  svg{width:100%;height:210px;display:block}
+  .login{display:grid;grid-template-columns:1.05fr .95fr;min-height:calc(100vh - 57px)}
+  .story{padding:8% 8%;display:flex;flex-direction:column;justify-content:center}
+  .story h1{font-size:54px;line-height:1.12;letter-spacing:-1.4px}
+  form{width:min(380px,100%);display:grid;gap:14px}
+  .form{display:grid;place-items:center;padding:36px}
+  label{display:grid;gap:8px;font-size:13px}
+  input{height:44px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.045);color:var(--ink);padding:0 12px}
+  .hide{display:none}
+  @media(max-width:900px){.side{display:none}.metrics,.sum{grid-template-columns:1fr 1fr}.story{display:none}.login{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="switcher"><b>云响设计预览</b>
+  <button class="on" data-s="refund">可补空回</button>
+  <button data-s="stats">数据统计</button>
+  <button data-s="admin">申请处理</button>
+  <button data-s="login">登录</button>
+</div>
+<section id="refund" class="app">
+  <aside class="side"><div class="brand"><span class="logo">云</span>云响</div><div class="online">● 已连接 NewAPI</div><div class="g">工作台</div><button class="nav">我的概览</button><button class="nav">数据统计</button><button class="nav on">可补空回</button><div class="g">我的</div><button class="nav">我的申请</button><button class="nav">补偿记录</button><button class="nav">补偿规则</button><div class="foot">退出</div></aside>
+  <div class="main"><header class="top"><span>工作台 <i>/</i> 可补空回</span><div class="tools"><span class="icon">搜</span><span class="icon">日</span><span class="avatar">测</span></div></header>
+    <div class="page"><div class="kicker">MY WORKSPACE</div><h1>可补空回</h1><p class="sub">查询当前账号。正常自动补，异常才进入人工审批。</p>
+      <div class="card row"><div><div class="who"><span class="avatar">测</span>当前账号 · fixture-user</div><div style="height:12px"></div><span class="pill ok">累计补回 · 额度 165.00</span></div><button class="btn">查询空回</button></div>
+      <div class="panel"><h2>可补额度与模型</h2><div class="sum"><div><small>可补额度</small><div class="good" style="font-size:30px;font-weight:750;margin-top:8px">380</div></div><div><small>模型</small><div style="font-size:30px;font-weight:750;margin-top:8px">2</div></div><div><small>可申请</small><div style="font-size:30px;font-weight:750;margin-top:8px">3 笔</div></div></div>
+        <div class="model"><b>gemini-3-flash-preview</b><span>额度 320 · 2 次</span></div>
+        <div class="model"><b>gpt-4.1-mini</b><span>额度 60 · 1 次</span></div>
+        <div style="display:flex;justify-content:flex-end;padding:0 18px 16px"><button class="btn">补额度</button></div>
+      </div>
+      <div class="panel"><h2>补回记录 · 9 条</h2>
+        <div class="rec"><span class="pill ok">成功</span><span>10/07 01:14 ~ 11/01 19:25</span><b class="good">额度 65.00</b><span>7 个模型</span><span>收起</span></div>
+        <div class="day"><div><span>10/27 · 额度 1.00 · 1 次</span><span>[福利] gemini-3-flash-preview</span></div><div><span>10/26 · 额度 1.00 · 1 次</span><span>[福利] gemini-3-flash-preview</span></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="stats" class="app hide">
+  <aside class="side"><div class="brand"><span class="logo">云</span>云响</div><div class="g">工作台</div><button class="nav">我的概览</button><button class="nav on">数据统计</button><button class="nav">可补空回</button></aside>
+  <div class="main"><header class="top"><span>工作台 <i>/</i> 数据统计</span><div class="tools"><span class="avatar">测</span></div></header>
+    <div class="page"><div class="kicker">MY WORKSPACE</div><h1>数据统计</h1><p class="sub">当前账号近 30 天已到账补回。没有站点筛选，也没有未接入的钱包空卡。</p>
+      <div class="seg"><button class="on">近 30 天</button><button>近 7 天</button><button>近 90 天</button><button>自动刷新</button></div>
+      <div class="metrics"><div class="card"><small>累计补回</small><strong class="good">165.00</strong><small>已到账额度</small></div><div class="card"><small>成功笔数</small><strong>9</strong><small>近 30 天</small></div><div class="card"><small>今日剩余额度</small><strong>298</strong><small>上限 300</small></div><div class="card"><small>今日剩余次数</small><strong>4</strong><small>上限 5</small></div></div>
+      <div class="panel"><h2>我的云响补额度趋势</h2><svg viewBox="0 0 760 210"><path d="M28 168 C 90 166,140 142,190 138 S 290 112,350 96 S 470 78,560 58 S 670 34,732 30" fill="none" stroke="#3b82f6" stroke-width="3"/><path d="M28 168 C 90 166,140 142,190 138 S 290 112,350 96 S 470 78,560 58 S 670 34,732 30 V 190 H 28 Z" fill="rgba(59,130,246,.16)"/><circle cx="560" cy="58" r="5" fill="#3b82f6"/></svg><p class="sub" style="padding:0 18px 16px">11/01 · 额度 65.00 · 7 个模型。悬停查看当天，不是静态图片。</p></div>
+    </div>
+  </div>
+</section>
+<section id="admin" class="app hide">
+  <aside class="side"><div class="brand"><span class="logo">云</span>云响</div><div class="g">站长</div><button class="nav on">申请处理</button><button class="nav">补偿统计</button><button class="nav">规则与数据</button><button class="nav">通知</button></aside>
+  <div class="main"><header class="top"><span>站长 <i>/</i> 申请处理</span><div class="tools"><span class="avatar">管</span></div></header>
+    <div class="page"><div class="kicker">ADMIN</div><h1>申请处理中心</h1><p class="sub">同一用户的多个模型合并成一张卡。订阅补额审核通过后进入余额。</p>
+      <div class="seg"><button>待审核 3</button><button class="on">补偿成功 6</button><button>未通过 1</button><button>待对账 0</button></div>
+      <div class="panel"><div class="model" style="margin-top:16px"><div><b>fixture-user</b><div class="sub">ID 7 · 2 个模型 · 11/02 19:25</div></div><div style="text-align:right"><b class="good">额度 380</b><div><span class="pill wait">待人工审核</span></div></div></div>
+        <div class="day"><div><span>gemini-3-flash-preview</span><span class="warn">额度 320 · 已下架 · 需审核</span></div><div><span>订阅额度 · gpt-4.1-mini</span><span>额度 60 · 通过后补进余额</span></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="login" class="hide"><div class="login app"><div class="story"><div class="brand"><span class="logo">云</span>云响</div><div class="kicker">补偿工作台</div><h1>空了有回响，<br>额度回到余额。</h1><p class="sub">使用 NewAPI 原账号登录。Logo 自动读取原站。</p></div><div class="form"><form><div class="kicker">WELCOME</div><h1>登录</h1><label>用户名<input placeholder="原站用户名"></label><label>密码<input placeholder="原站密码" type="password"></label><button class="btn" type="button">登录工作台</button><p class="sub">不创建独立账号 · 密码不落库</p></form></div></div></section>
+<script>
+  const ids=['refund','stats','admin','login'];
+  function show(id){ids.forEach(x=>document.getElementById(x).classList.toggle('hide',x!==id));document.querySelectorAll('.switcher button').forEach(b=>b.classList.toggle('on',b.dataset.s===id));}
+  document.querySelectorAll('.switcher button').forEach(b=>b.onclick=()=>show(b.dataset.s));
+  const q=new URLSearchParams(location.search).get('screen');
+  if(ids.includes(q)) show(q);
+</script>
+</body>
+</html>

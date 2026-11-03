@@ -1,0 +1,11 @@
+.env
+.env.docker
+.env.auto
+.env.auto.pending
+.yunxiang-deploy.lock
+compose.generated.json
+secrets/
+data/
+coverage/
+test-results/
+*.log

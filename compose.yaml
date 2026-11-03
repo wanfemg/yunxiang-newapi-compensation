@@ -1,0 +1,52 @@
+name: newapi-compensation
+services:
+  compensation:
+    build:
+      context: .
+      target: runtime
+    image: newapi-compensation:local
+    restart: unless-stopped
+    init: true
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3210"
+      DATA_DIR: /app/data
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Run bash deploy.sh first}
+      NEWAPI_URL: ${NEWAPI_URL:?Run bash deploy.sh first}
+      NEWAPI_ADMIN_USER_ID: ${NEWAPI_ADMIN_USER_ID:?Set original NewAPI admin user ID}
+      NEWAPI_ADMIN_TOKEN_FILE: /run/secrets/newapi_admin_token
+      NEWAPI_DB_CONFIG_FILE: /run/secrets/newapi_database
+      ALLOW_HTTP_UPSTREAM: ${ALLOW_HTTP_UPSTREAM:-0}
+    secrets:
+      - newapi_admin_token
+      - newapi_database
+    ports:
+      - "127.0.0.1:${COMPENSATION_PORT:-3210}:3210"
+    volumes:
+      - compensation_data:/app/data
+    networks:
+      - newapi
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+secrets:
+  newapi_database:
+    file: ./secrets/newapi_database.json
+  newapi_admin_token:
+    file: ./secrets/newapi_admin_token
+volumes:
+  compensation_data:
+networks:
+  newapi:
+    external: true
+    name: ${NEWAPI_NETWORK:?Set existing NewAPI Docker network}
