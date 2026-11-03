@@ -9,6 +9,15 @@ async function setup(t){const remote=await mockServer();const store=new Store();
   const request=async(path,{method='GET',body,cookie,csrf,requestOrigin=origin}={})=>{const res=await fetch(base+path,{method,headers:{'Content-Type':'application/json',Origin:requestOrigin,...(cookie?{Cookie:cookie}:{}),...(csrf?{'X-CSRF-Token':csrf}:{})},body:body===undefined?undefined:JSON.stringify(body)});return {status:res.status,json:await res.json(),cookie:res.headers.get('set-cookie')};};
   const login=async who=>{const out=await request('/api/auth/login',{method:'POST',body:{username:who.username,password:'fixture-password'}});assert.equal(out.status,200);return {cookie:out.cookie.split(';')[0],csrf:out.json.data.csrf};};return {remote,store,server,base,request,login};}
 
+test('旧版原站 Cookie 登录不向浏览器泄漏上游 Cookie，撤销账号立即阻断',async t=>{
+ const f=await setup(t);f.remote.data.legacyLogin=true;
+ const response=await f.request('/api/auth/login',{method:'POST',body:{username:user.username,password:'fixture-password'}});
+ assert.equal(response.status,200);assert.equal(response.json.data.user.id,7);
+ assert.ok(!JSON.stringify(response).includes('legacy-7'));
+ const cookie=response.cookie.split(';')[0];assert.equal((await f.request('/api/me',{cookie})).status,200);
+ f.remote.data.disabled=true;assert.equal((await f.request('/api/me',{cookie})).status,401);
+});
+
 test('数据库清理仅管理员可预览执行，要求 CSRF 和单次确认',async t=>{
  const f=await setup(t),a=await f.login(admin),u=await f.login(user);
  const body={cache:true,notifications:true,backups:false,compact:false,cacheDays:7,notificationDays:30,backupDays:30};

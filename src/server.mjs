@@ -36,7 +36,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
     return { user: cleanUser(user), csrf };
   }
   async function finishLogin(data, res) {
-    if (!data?.access_token) {
+    if (!data?.access_token && !data?.session_cookie) {
       if (data?.require_verification && data.flow_token) {
         const challengeId = randomBytes(24).toString('base64url');
         challenges.set(challengeId, { flow: data.flow_token, expires: Date.now() + 300000 });
@@ -44,8 +44,9 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       }
       throw new AppError('原站登录响应不兼容或需要其他验证方式', 401);
     }
-    const user = await upstream.identity(data.access_token, data.user?.id);
-    return setSession(res, data.access_token, user);
+    const credential = data.access_token || {cookie:data.session_cookie};
+    const user = await upstream.identity(credential, data.user?.id);
+    return setSession(res, credential, user);
   }
   const server = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
