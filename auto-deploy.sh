@@ -2,6 +2,7 @@
 set -euo pipefail
 umask 077
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+trap 'code=$?; printf "部署失败（退出码 %s，行 %s），未删除持久数据。运行 bash status.sh 查看诊断。\n" "$code" "$LINENO" >&2; exit "$code"' ERR
 non_interactive=0
 case ${1:-} in
   --non-interactive) non_interactive=1 ;;
@@ -23,6 +24,8 @@ prompt(){
 command -v docker >/dev/null || { echo '需要 Docker Engine 与 Compose v2。'; exit 1; }
 docker info >/dev/null
 docker compose version >/dev/null
+echo "Docker context：$(docker context show)"
+echo '镜像与容器将创建在此 Docker 引擎；宝塔必须连接同一引擎。'
 command -v flock >/dev/null || { echo '需要 util-linux 的 flock，防止并发部署。'; exit 1; }
 exec 9>.yunxiang-deploy.lock
 flock -n 9 || { echo '已有云响部署正在运行。'; exit 1; }
@@ -98,18 +101,32 @@ if [[ ! -s secrets/newapi_admin_token ]]; then
   unset token
 fi
 unset NEWAPI_ADMIN_TOKEN
+# Migrate names without changing the Compose project or persistent ledger volume.
+node_tool --input-type=module -e 'import fs from "node:fs";const p=JSON.parse(fs.readFileSync(0,"utf8"));if(p.name!=="newapi-compensation"||!p.services?.compensation)throw Error("未知的编排配置，未迁移");p.services.compensation.image="yunxiang-newapi-compensation:local";p.services.compensation.container_name="yunxiang-compensation";p.volumes.compensation_data={...p.volumes.compensation_data,name:"newapi-compensation_compensation_data"};console.log(JSON.stringify(p,null,2));' < compose.generated.json > compose.generated.json.pending
+mv -- compose.generated.json.pending compose.generated.json
 chmod 600 .env.auto compose.generated.json
 chmod 444 secrets/newapi_admin_token secrets/newapi_database.json
 # Saved configuration wins on updates; never reconnect a ledger via shell env.
 unset PUBLIC_ORIGIN NEWAPI_URL NEWAPI_ADMIN_USER_ID ALLOW_HTTP_UPSTREAM
-compose(){ docker compose --env-file .env.auto -f compose.generated.json "$@"; }
+# Export resolved paths/config so panel imports do not depend on .env.auto.
+docker compose --env-file .env.auto -f compose.generated.json config > docker-compose.yml.pending
+[[ -s docker-compose.yml.pending ]] || { echo '标准编排文件生成失败。'; exit 1; }
+chmod 600 docker-compose.yml.pending
+mv -- docker-compose.yml.pending docker-compose.yml
+compose(){ docker compose -p newapi-compensation -f docker-compose.yml "$@"; }
 compose config --quiet
 compose up -d --build --wait --wait-timeout 180
 compose exec -T compensation node src/preflight.mjs
+docker image inspect yunxiang-newapi-compensation:local --format '镜像已创建：{{index .RepoTags 0}}（{{.Id}}）'
+compose ps
 compose exec -T compensation node --input-type=module -e 'console.log("访问地址："+process.env.PUBLIC_ORIGIN);console.log("本机入口：http://127.0.0.1:"+process.env.PORT);'
 echo '云响已启动。反向代理指向所选本机端口，申请及发放默认关闭。'
 echo '持久数据：newapi-compensation_compensation_data；更新不会删除数据库。'
-echo '备份：docker compose --env-file .env.auto -f compose.generated.json exec -T compensation node src/backup.mjs'
-echo '运行记录：docker compose --env-file .env.auto -f compose.generated.json logs --tail 100 compensation'
+echo "宝塔编排导入文件：$PWD/docker-compose.yml"
+echo '宝塔 Docker → 编排：导入上方现有文件；不要另建副本、不要改项目名或数据卷。'
+echo 'Docker Compose 项目名：newapi-compensation；容器名：yunxiang-compensation'
+echo '宝塔镜像搜索：yunxiang-newapi-compensation（同时检查本地镜像，不是镜像仓库搜索）。'
+echo '备份：docker compose -p newapi-compensation -f docker-compose.yml exec -T compensation node src/backup.mjs'
+echo '诊断：bash status.sh；日志：docker compose -p newapi-compensation -f docker-compose.yml logs --tail 100 compensation'
 echo '更新：在本目录运行 bash install.sh；下载式更新使用原一键命令。'
 echo '登录：使用原 NewAPI 用户或站长账号；生产不会创建演示账号。'

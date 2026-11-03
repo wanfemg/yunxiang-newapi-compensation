@@ -33,13 +33,13 @@ tar -xzf "$stage/source.tar.gz" -C "$stage" --no-same-owner --no-same-permission
 source_dir=$(find "$stage" -maxdepth 3 -type f -name auto-deploy.sh -print)
 [[ -n $source_dir && $source_dir != *$'\n'* ]] || { echo '下载版本不包含唯一的云响部署入口，未修改现有安装。'; exit 1; }
 source_dir=$(dirname -- "$source_dir")
-for item in src public test Dockerfile package.json auto-deploy.sh install.sh README.md; do
+for item in src public test Dockerfile .dockerignore package.json auto-deploy.sh install.sh status.sh README.md; do
   [[ -e $source_dir/$item ]] || { echo "发布包缺少 $item"; exit 1; }
 done
-for item in src public test Dockerfile package.json auto-deploy.sh install.sh README.md; do
+for item in src public test Dockerfile .dockerignore package.json auto-deploy.sh install.sh status.sh README.md; do
   [[ ! -L $target/$item ]] || { echo "安装路径是符号链接：$item"; exit 1; }
 done
-for item in src public test Dockerfile package.json auto-deploy.sh install.sh README.md; do cp -R -- "$source_dir/$item" "$target/"; done
+for item in src public test Dockerfile .dockerignore package.json auto-deploy.sh install.sh status.sh README.md; do cp -R -- "$source_dir/$item" "$target/"; done
 mkdir -p -- "$target/docs"
 [[ ! -L $target/docs ]] || { echo '文档目录是符号链接。'; exit 1; }
 [[ ! -f $source_dir/docs/one-click.md ]] || cp -- "$source_dir/docs/one-click.md" "$target/docs/one-click.md"

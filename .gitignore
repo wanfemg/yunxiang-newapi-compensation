@@ -4,6 +4,9 @@
 .env.auto.pending
 .yunxiang-deploy.lock
 compose.generated.json
+compose.generated.json.pending
+docker-compose.yml
+docker-compose.yml.pending
 secrets/
 data/
 coverage/

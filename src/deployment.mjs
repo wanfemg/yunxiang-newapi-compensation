@@ -30,14 +30,14 @@ export function composePlan({network='host',port=3210}) {
   if(!Number.isInteger(port)||port<1||port>65535)throw Error('本地端口无效');
   if(!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(network)||['bridge','none'].includes(network))throw Error('网络名称无效');
   return {name:'newapi-compensation',services:{compensation:{
-    build:{context:'.',target:'runtime'},image:'newapi-compensation:local',restart:'unless-stopped',init:true,
+    build:{context:'.',target:'runtime'},image:'yunxiang-newapi-compensation:local',container_name:'yunxiang-compensation',restart:'unless-stopped',init:true,
     environment:{HOST:network==='host'?'127.0.0.1':'0.0.0.0',PORT:String(port),DATA_DIR:'/app/data',PUBLIC_ORIGIN:'${PUBLIC_ORIGIN}',NEWAPI_URL:'${NEWAPI_URL}',NEWAPI_ADMIN_USER_ID:'${NEWAPI_ADMIN_USER_ID}',NEWAPI_ADMIN_TOKEN_FILE:'/run/secrets/newapi_admin_token',NEWAPI_DB_CONFIG_FILE:'/run/secrets/newapi_database',ALLOW_HTTP_UPSTREAM:'${ALLOW_HTTP_UPSTREAM:-0}'},
     network_mode:network,volumes:['compensation_data:/app/data'],secrets:['newapi_admin_token','newapi_database'],
     ...(network!=='host'?{ports:[`127.0.0.1:${port}:${port}`]}:{}),
     read_only:true,tmpfs:['/tmp:size=16m,mode=1777'],cap_drop:['ALL'],security_opt:['no-new-privileges:true'],stop_grace_period:'45s',
     healthcheck:{test:['CMD','node','-e',`fetch('http://127.0.0.1:${port}/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))`],interval:'30s',timeout:'5s',start_period:'10s',retries:3},
     logging:{driver:'json-file',options:{'max-size':'10m','max-file':'3'}}
-  }},volumes:{compensation_data:{}},secrets:{newapi_admin_token:{file:'./secrets/newapi_admin_token'},newapi_database:{file:'./secrets/newapi_database.json'}}};
+  }},volumes:{compensation_data:{name:'newapi-compensation_compensation_data'}},secrets:{newapi_admin_token:{file:'./secrets/newapi_admin_token'},newapi_database:{file:'./secrets/newapi_database.json'}}};
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   try {
