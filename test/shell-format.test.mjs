@@ -13,3 +13,11 @@ test('Linux shell entrypoints use LF without BOM', () => {
     }
   }
 });
+
+test('Docker test stage includes shell fixtures in build context and COPY', () => {
+  const root = join(import.meta.dirname, '..');
+  const dockerfile = readFileSync(join(root, 'Dockerfile'), 'utf8');
+  const ignore = readFileSync(join(root, '.dockerignore'), 'utf8');
+  assert.match(ignore, /^!\*\.sh\s*$/m, 'root shell scripts must reach the build context');
+  assert.match(dockerfile, /COPY \*\.sh \.\/[\s\S]*?RUN node --test/, 'copy deployment scripts before testing');
+});
