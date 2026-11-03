@@ -41,6 +41,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-comp
 
 自动安装使用 `.env.auto`、`compose.generated.json`，不自动覆盖旧 `.env.docker` 配置。已有手动部署应先停止旧云响再切换入口并核对 NEWAPI_URL；命名卷同为 `newapi-compensation_compensation_data`，严禁双开或 `down -v`。远程接口 URL 不同也会触发账本实例绑定校验。
 
+## 宝塔 Docker 面板
+
+部署完成后对应对象：镜像 `yunxiang-newapi-compensation:local`、容器 `yunxiang-compensation`、Compose 项目 `newapi-compensation`。后者保留旧名称以复用已有服务和账本，数据卷明确固定为 `newapi-compensation_compensation_data`。
+
+安装器在安装目录生成 `docker-compose.yml`，由 Docker Compose 导出标准 YAML，包含解析后的配置及绝对构建/secret 路径，不依赖宝塔额外读取 `.env.auto`。在宝塔 Docker 的编排管理中导入该现有文件，导入路径默认 `/opt/yunxiang/docker-compose.yml`。各宝塔版本的导入入口可能不同；面板未自动登记不代表 Docker 容器不存在。禁止手动写入宝塔内部数据库、复制到新的项目名重复运行，或更换数据卷造成去重账本丢失。配置文件虽然没有令牌正文，仍按 600 权限保管。
+
+镜像列表查看本地镜像，不是在线仓库搜索。容器和镜像均看不到时，执行：
+
+```bash
+cd /opt/yunxiang
+bash status.sh
+```
+
+诊断显示 Docker context、引擎名称、镜像、项目容器和健康接口，不显示管理令牌。安装器与宝塔需要连接同一 Docker 引擎。只有下载源码但构建或启动失败时，不会产生运行容器；保留终端报错再处理，不要删除持久卷。旧部署再次运行下载式一键命令，会自动迁移镜像/容器名称并导出标准编排，保留接入配置与数据卷。
+
 ## 持久化与备份
 
 生产启动自动创建 `/app/data/compensation.sqlite`，WAL 模式。包含规则、原消费与申请快照、唯一请求索引、发放账本、查询缓存、审计事件及通知队列。不是 NewAPI 原数据库，也不是临时日志文件。设置页显示持久化状态；演示预览使用内存且明确标记。

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,cpSync,readFileSync,rmSync,existsSync} from 'node:fs';
+import {mkdtempSync,cpSync,readFileSync,writeFileSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -28,6 +28,28 @@ test('one-click shell writes first-run config and reuses it on updates',{skip:!a
     assert.equal(readFileSync(join(dir,'.env.auto'),'utf8'),env);
     const compose=JSON.parse(readFileSync(join(dir,'compose.generated.json'),'utf8'));
     assert.deepEqual(compose.services.compensation.volumes,['compensation_data:/app/data']);
+    assert.equal(compose.services.compensation.image,'yunxiang-newapi-compensation:local');
+    assert.equal(compose.services.compensation.container_name,'yunxiang-compensation');
+    assert.equal(compose.volumes.compensation_data.name,'newapi-compensation_compensation_data');
+    const exported=JSON.parse(readFileSync(join(dir,'docker-compose.yml'),'utf8'));
+    assert.equal(exported.services.compensation.build.context,dir);
+    assert.match(exported.secrets.newapi_admin_token.file,/newapi_admin_token$/);
+    assert.match(next.stdout,/docker-compose.yml/);
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+test('legacy generated deployment migrates names without changing upstream or data volume',{skip:!available},()=>{
+  const dir=setup();
+  try{
+    assert.equal(run(dir).status,0);
+    const env=readFileSync(join(dir,'.env.auto'),'utf8');
+    const file=join(dir,'compose.generated.json'),old=JSON.parse(readFileSync(file,'utf8'));
+    old.services.compensation.image='newapi-compensation:local';delete old.services.compensation.container_name;old.volumes.compensation_data={};
+    writeFileSync(file,JSON.stringify(old));
+    const result=run(dir);assert.equal(result.status,0,result.stdout+result.stderr);
+    const migrated=JSON.parse(readFileSync(file,'utf8'));
+    assert.equal(migrated.services.compensation.image,'yunxiang-newapi-compensation:local');
+    assert.equal(migrated.volumes.compensation_data.name,'newapi-compensation_compensation_data');
+    assert.equal(readFileSync(join(dir,'.env.auto'),'utf8'),env);
   }finally{rmSync(dir,{recursive:true,force:true});}
 });
 test('one-click build failure does not report success or remove saved configuration',{skip:!available},()=>{

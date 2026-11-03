@@ -32,6 +32,8 @@ test('generated Compose preserves stable ledger volume, hardening and health por
   for(const network of ['host','newapi_default']){
     const p=composePlan({network,port:3221}),s=p.services.compensation;
     assert.equal(p.name,'newapi-compensation');assert.deepEqual(s.volumes,['compensation_data:/app/data']);
+    assert.equal(s.image,'yunxiang-newapi-compensation:local');assert.equal(s.container_name,'yunxiang-compensation');
+    assert.equal(p.volumes.compensation_data.name,'newapi-compensation_compensation_data');
     assert.equal(s.environment.PORT,'3221');assert.match(s.healthcheck.test[3],/3221\/api\/health/);
     assert.equal(s.read_only,true);assert.deepEqual(s.cap_drop,['ALL']);
     if(network==='host'){assert.equal(s.environment.HOST,'127.0.0.1');assert.equal(s.ports,undefined);}
