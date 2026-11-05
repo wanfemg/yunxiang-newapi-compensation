@@ -4,6 +4,13 @@ import {fixture,log,user,admin,rules} from './helpers.mjs';
 import {displayConfig,formatQuota,parseQuota,inputQuota} from '../public/display.js';
 import {validateRules} from '../src/rules.mjs';
 import {UpstreamError} from '../src/newapi.mjs';
+import {compensationLabel} from '../src/rules.mjs';
+
+test('补偿记录明确标识为空回补偿',()=>{
+  assert.equal(compensationLabel(log(),'self'),'空回补偿');
+  assert.equal(compensationLabel(log('subscription-label',{other:'{"billing_source":"subscription","subscription_id":17}'}),'self'),'订阅空回 · 余额补偿');
+  assert.equal(compensationLabel(log(),'manual'),'人工空回补偿');
+});
 
 test('订阅审批后返还结果不明时锁定，重复处理不重发',async()=>{
   const f=fixture({logs:[log('subscription-timeout',{other:'{"billing_source":"subscription","subscription_id":17}'})],credit:async()=>{throw new UpstreamError('timeout');}});

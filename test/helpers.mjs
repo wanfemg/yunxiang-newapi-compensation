@@ -26,14 +26,15 @@ export async function mockServer() {
     const url=new URL(req.url,'http://localhost');
     const reply=(d,success=true)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify({success,data:d}));};
     if(url.pathname==='/api/status')return reply(data.display||{quota_display_type:'CUSTOM',quota_per_unit:100,custom_currency_symbol:'额度 ',custom_currency_exchange_rate:1});
-    if(url.pathname==='/api/user/login/encryption-key')return reply({enabled:false});
+    if(url.pathname==='/api/user/login/encryption-key'){if(data.legacyLogin){res.statusCode=404;return reply(null,false);}return reply({enabled:false});}
     if(url.pathname==='/api/user/login') {
       const u=b.username===user.username?user:b.username===admin.username?admin:null;
+      if(data.legacyLogin&&u&&b.password==='fixture-password'){res.setHeader('Set-Cookie',`session=legacy-${u.id}; HttpOnly; Path=/`);return reply(u);}
       return u&&b.password==='fixture-password'?reply({access_token:u.id===7?'fixture-user-token':'fixture-admin-token',user:u}):reply(null,false);
     }
     const token=req.headers.authorization;
     if(url.pathname==='/api/user/self') {
-      const u=token==='Bearer fixture-admin-token'?admin:token==='Bearer fixture-user-token'&&!data.disabled?user:null;
+      const u=token==='Bearer fixture-admin-token'?admin:(token==='Bearer fixture-user-token'||(data.legacyLogin&&req.headers.cookie==='session=legacy-7'))&&!data.disabled?user:null;
       return reply(u,Boolean(u));
     }
     if(token!=='Bearer fixture-admin-token') {res.statusCode=403;return reply(null,false);}

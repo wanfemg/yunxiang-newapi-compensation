@@ -3,13 +3,14 @@ export class AppError extends Error {
 }
 export const defaults = {
   version: 1, applicationsEnabled: false, executionEnabled: false, selfServiceEnabled: true, selfServiceMaxQuota: 100000, selfServiceMinAgeSeconds: 60, timezone: 'Asia/Shanghai',
-  channels: [], models: [], restrictModels:true, userGroups: [], blockedUsers: [], refundBasisPoints: 10000,
+  channels: [], models: [], excludedModels: [], restrictModels:true, userGroups: [], blockedUsers: [], refundBasisPoints: 10000,
+  aiEnabled: false, aiAutoThreshold: 90, aiDailyLimit: 30,
   perRecordQuota: 0, userDailyQuota: 0, userDailyCount: 0, siteDailyQuota: 0, siteDailyCount: 0,
   maxPending: 10, applicationHours: 72, consumptionStart: null, consumptionEnd: null,
   openStart: '00:00', openEnd: '00:00', dailyResetTime: '00:00',
-  notifications: { enabled: false, events: ['application_pending', 'review_result', 'compensation_success', 'execution_failed', 'execution_unknown'] }
+  notifications: { enabled: false, events: ['application_pending', 'review_result', 'compensation_success', 'execution_failed', 'execution_unknown', 'ai_reviewing', 'ai_reviewed', 'ai_auto_compensation', 'ai_manual_review'] }
 };
-export const eventTypes = ['application_pending', 'review_result', 'compensation_success', 'execution_failed', 'execution_unknown', 'notification_test'];
+export const eventTypes = ['application_pending', 'review_result', 'compensation_success', 'execution_failed', 'execution_unknown', 'ai_reviewing', 'ai_reviewed', 'ai_auto_compensation', 'ai_manual_review', 'notification_test'];
 export function positiveInt(value, label = '数值') {
   if (!Number.isSafeInteger(value) || value <= 0) throw new AppError(`${label}必须是正整数`);
   return value;
@@ -17,6 +18,7 @@ export function positiveInt(value, label = '数值') {
 export function validateRules(input) {
   const r = structuredClone(input);
   r.dailyResetTime ??= defaults.dailyResetTime;
+  if (!Object.hasOwn(r, 'excludedModels')) r.excludedModels = [];
   for (const key of Object.keys(defaults)) if (!(key in r)) throw new AppError(`缺少规则：${key}`);
   for (const key of ['applicationsEnabled', 'executionEnabled', 'selfServiceEnabled','restrictModels']) if (typeof r[key] !== 'boolean') throw new AppError('开关必须为布尔值');
   try { new Intl.DateTimeFormat('en', { timeZone: r.timezone }).format(); } catch { throw new AppError('时区无效'); }
@@ -28,9 +30,20 @@ export function validateRules(input) {
     if (!Array.isArray(r[key]) || r[key].some(v => typeof v !== 'string' || !v.trim() || v.length > 200) || r[key].length > 1000) throw new AppError(`${key}格式无效`);
     r[key] = [...new Set(r[key].map(v => v.trim()))];
   }
+  if (!Array.isArray(r.excludedModels) || r.excludedModels.length > 10000) throw new AppError('不可补模型规则格式无效');
+  const exclusions = new Map();
+  for (const entry of r.excludedModels) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.model !== 'string' || !entry.model.trim() || entry.model.length > 200) throw new AppError('不可补模型规则格式无效');
+    const rule = { channelId: positiveInt(entry.channelId, '排除渠道 ID'), model: entry.model.trim() };
+    exclusions.set(JSON.stringify([rule.channelId, rule.model]), rule);
+  }
+  r.excludedModels = [...exclusions.values()];
   for (const key of ['perRecordQuota', 'userDailyQuota', 'userDailyCount', 'siteDailyQuota', 'siteDailyCount']) {
     if (!Number.isSafeInteger(r[key]) || r[key] < 0 || r[key] > 1_000_000_000_000) throw new AppError(`${key}必须是非负安全整数`);
   }
+  if (typeof r.aiEnabled !== 'boolean') throw new AppError('AI 判定开关必须为布尔值');
+  if (!Number.isSafeInteger(r.aiAutoThreshold) || r.aiAutoThreshold < 70 || r.aiAutoThreshold > 100) throw new AppError('AI 自动判定阈值须为 70–100');
+  if (!Number.isSafeInteger(r.aiDailyLimit) || r.aiDailyLimit < 1 || r.aiDailyLimit > 1000) throw new AppError('AI 每日审核次数须为 1–1000');
   positiveInt(r.maxPending, '待审核数量'); positiveInt(r.applicationHours, '申请有效小时');
   positiveInt(r.selfServiceMaxQuota, '自助单笔额度上限');positiveInt(r.selfServiceMinAgeSeconds, '结算等待秒数');
   if(r.selfServiceMaxQuota>1_000_000_000_000||r.selfServiceMinAgeSeconds<30||r.selfServiceMinAgeSeconds>86400)throw new AppError('自助上限或结算等待时间无效（30–86400 秒）');
@@ -74,9 +87,17 @@ export function fundingSource(log) {
   if(other.billing_source==='subscription'||other.subscription_id)return 'subscription';
   return other.billing_source==='wallet'?'wallet':'unknown';
 }
+export function compensationLabel(log, source = 'self') {
+  if (fundingSource(log) === 'subscription') return '订阅空回 · 余额补偿';
+  return source === 'manual' ? '人工空回补偿' : '空回补偿';
+}
+export function modelExcluded(log, rules) {
+  return (rules.excludedModels || []).some(entry => entry.channelId === log.channel && entry.model === log.model_name);
+}
 export function assessLog(log, user, r, now = Date.now()) {
   const result = { candidate: false, eligible: false, evidence: 'pending', reasons: [], expectedQuota: 0, deadline: null };
   if (log.user_id !== user.id) { result.reasons.push('不是本人的消费'); return result; }
+  if (modelExcluded(log, r)) { result.reasons.push('该模型不参与补偿，已跳过空回检测'); return result; }
   if (log.type !== 2 || !Number.isSafeInteger(log.quota) || log.quota <= 0 || log.completion_tokens !== 0) { result.reasons.push('不满足已扣费且输出 token 为零的候选条件'); return result; }
   result.candidate = true;
   let other; try { other = typeof log.other === 'string' ? JSON.parse(log.other || '{}') : (log.other || {}); } catch { other = {}; }
@@ -105,7 +126,7 @@ export function publicLog(log) {
   return {...Object.fromEntries(['request_id', 'created_at', 'model_name', 'quota', 'prompt_tokens', 'completion_tokens', 'is_stream'].map(k => [k, log[k]])),fundingSource:fundingSource(log)};
 }
 
-export function selfServiceDecision(log, user, rules, now = Date.now()) {
+export function selfServiceDecision(log, user, rules, now = Date.now(), aiReview = null) {
   const assessment = assessLog(log, user, rules, now), reasons = [...assessment.reasons];
   if(fundingSource(log)==='subscription')reasons.push('订阅消费须站长审批，批准并核验后补入钱包余额');
   if(rules.retiredModelKeys?.includes(log.channel+':'+log.model_name))reasons.push('原消费模型已下架、删除或渠道停用，转人工审核');
@@ -115,7 +136,8 @@ export function selfServiceDecision(log, user, rules, now = Date.now()) {
   const reject=other.admin_info?.reject_reason||other.reject_reason;
   if(!rules.selfServiceEnabled)reasons.push('自助返还已暂停');
   if(!rules.executionEnabled)reasons.push('返还执行暂未开放');
-  if(assessment.evidence!=='empty_marked'||!['gemini_empty_candidates','empty_response'].includes(reject))reasons.push('缺少明确的上游空回证据');
+  const aiEmpty = rules.aiEnabled && aiReview?.decision === 'empty' && aiReview.confidence >= rules.aiAutoThreshold / 100;
+  if(!aiEmpty && (assessment.evidence!=='empty_marked'||!['gemini_empty_candidates','empty_response'].includes(reject)))reasons.push('缺少明确的上游空回证据');
   if(other.billing_source!=='wallet'&&fundingSource(log)!=='subscription')reasons.push('余额消费来源尚未确认');
   if((other.tool_calls&&(!Array.isArray(other.tool_calls)||other.tool_calls.length))||other.function_call||(other.tool_surcharges&&(!Array.isArray(other.tool_surcharges)||other.tool_surcharges.length))||other.image_output||other.audio_output||other.reasoning_tokens||other.thoughts_tokens)reasons.push('存在工具、多模态或推理输出，须人工核实');
   if(['refunded','refunded_quota','refund_quota','refund_amount','refund_status'].some(key=>other[key]!==undefined&&![false,0,'0','none','not_refunded'].includes(other[key])))reasons.push('存在退款或退款状态不明的标记');

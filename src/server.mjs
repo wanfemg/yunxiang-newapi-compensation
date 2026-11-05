@@ -29,23 +29,28 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
   const service = new Compensation(store, upstream), sessions = new Map(), challenges = new Map(), rate = new Map();
   const expectedOrigin = new URL(origin).origin, secure = new URL(origin).protocol === 'https:';
   const cookieName = secure ? '__Host-comp_session' : 'comp_session';
-  function setSession(res, token, user) {
+  const sessionHours = Number(process.env.SESSION_HOURS || 8);
+  const normalSessionSeconds = Number.isSafeInteger(sessionHours) && sessionHours >= 1 && sessionHours <= 720 ? sessionHours * 3600 : 28800;
+  const rememberSessionSeconds = Math.max(normalSessionSeconds, 30 * 24 * 3600);
+  function setSession(res, token, user, remember = false) {
     const raw = randomBytes(32).toString('base64url'), csrf = randomBytes(24).toString('base64url');
-    sessions.set(digest(raw), { token, user, csrf, expires: Date.now() + 8 * 3600000 });
-    res.setHeader('Set-Cookie', `${cookieName}=${raw}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800${secure ? '; Secure' : ''}`);
+    const maxAge = remember ? rememberSessionSeconds : normalSessionSeconds;
+    sessions.set(digest(raw), { token, user, csrf, expires: Date.now() + maxAge * 1000 });
+    res.setHeader('Set-Cookie', `${cookieName}=${raw}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure ? '; Secure' : ''}`);
     return { user: cleanUser(user), csrf };
   }
-  async function finishLogin(data, res) {
-    if (!data?.access_token) {
+  async function finishLogin(data, res, remember = false) {
+    if (!data?.access_token && !data?.session_cookie) {
       if (data?.require_verification && data.flow_token) {
         const challengeId = randomBytes(24).toString('base64url');
-        challenges.set(challengeId, { flow: data.flow_token, expires: Date.now() + 300000 });
+        challenges.set(challengeId, { flow: data.flow_token, remember, expires: Date.now() + 300000 });
         return { challengeId, methods: data.methods, requireVerification: true };
       }
       throw new AppError('原站登录响应不兼容或需要其他验证方式', 401);
     }
-    const user = await upstream.identity(data.access_token, data.user?.id);
-    return setSession(res, data.access_token, user);
+    const credential = data.access_token || {cookie:data.session_cookie};
+    const user = await upstream.identity(credential, data.user?.id);
+    return setSession(res, credential, user, remember);
   }
   const server = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Referrer-Policy', 'no-referrer');
@@ -55,10 +60,15 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
     const send = data => { res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.end(JSON.stringify({ success: true, data })); };
     try {
       const url = new URL(req.url, expectedOrigin), path = url.pathname;
-      if (req.method === 'GET' && ['/','/app.js','/style.css','/glass.css','/icons.js','/display.js','/controls.js'].includes(path)) {
+      if (secure && ['GET', 'HEAD'].includes(req.method) && req.headers['x-forwarded-proto'] === 'http') {
+        res.writeHead(308, { Location: expectedOrigin + path });
+        res.end(); return;
+      }
+      if (req.method === 'GET' && ['/','/app.js','/style.css','/glass.css','/icons.js','/display.js','/controls.js','/snapshot.js'].includes(path)) {
         const file = path === '/' ? 'index.html' : path.slice(1);
         res.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript; charset=utf-8' : file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/html; charset=utf-8');
-        res.end(readFileSync(join(publicDirectory, file))); return;
+        const content = readFileSync(join(publicDirectory, file));
+        res.end(file === 'index.html' ? content.toString('utf8').replace('<head>', '<head>\n  <meta name="application-origin" content="'+expectedOrigin+'">') : content); return;
       }
       if (path === '/api/health' && req.method === 'GET') return send({ status: 'ok', configured: Boolean(upstream.adminToken) });
       if (path === '/api/brand' && req.method === 'GET') {
@@ -72,7 +82,12 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       }
       if (!path.startsWith('/api/')) throw new AppError('接口不存在', 404);
       const mutating = !['GET', 'HEAD'].includes(req.method);
-      if (mutating && req.headers.origin !== expectedOrigin) throw new AppError('请求来源校验失败', 403);
+      if (mutating && req.headers.origin !== expectedOrigin) {
+        let receivedOrigin = 'missing';
+        try { receivedOrigin = new URL(req.headers.origin).origin; } catch { if (req.headers.origin) receivedOrigin = 'invalid'; }
+        console.warn(JSON.stringify({ event: 'request_origin_rejected', path, expectedOrigin, receivedOrigin }));
+        throw Object.assign(new AppError('请求来源校验失败，请使用 '+expectedOrigin+' 打开后重新登录', 403), { code: 'ORIGIN_MISMATCH' });
+      }
       if (mutating && !String(req.headers['content-type']).startsWith('application/json')) throw new AppError('仅接受 JSON 请求', 415);
       if (path.startsWith('/api/auth/') && req.method === 'POST' && path !== '/api/auth/logout') {
         const ip = req.socket.remoteAddress || '';
@@ -83,7 +98,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         const b = await readBody(req);
         if (path === '/api/auth/login') {
           if (typeof b.username !== 'string' || !b.username.trim() || b.username.length > 100 || typeof b.password !== 'string' || !b.password || b.password.length > 1024) throw new AppError('账号或密码格式错误');
-          return send(await finishLogin(await upstream.login(b.username.trim(), b.password), res));
+          return send(await finishLogin(await upstream.login(b.username.trim(), b.password), res, b.remember === true));
         }
         if (path === '/api/auth/verify') {
           const c = challenges.get(b.challengeId);
@@ -91,7 +106,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
           if (typeof b.code !== 'string' || !/^\d{6,8}$/.test(b.code)) throw new AppError('验证码格式错误');
           // Each local challenge is single use, including failed verification.
           challenges.delete(b.challengeId);
-          return send(await finishLogin(await upstream.verify(c.flow, b.code), res));
+          return send(await finishLogin(await upstream.verify(c.flow, b.code), res, c.remember === true));
         }
         throw new AppError('登录接口不存在', 404);
       }
@@ -112,6 +127,22 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       }
       if(path==='/api/admin/catalog'&&req.method==='GET')return send(await upstream.catalog());
       if(path==='/api/admin/groups'&&req.method==='GET')return send(await upstream.groups());
+      if(path==='/api/admin/ai-config'&&req.method==='GET'){
+        const c=store.aiConfig();
+        return send({baseUrl:c.baseUrl,model:c.model,timeoutMs:c.timeoutMs,configured:Boolean(c.baseUrl&&c.apiKey&&c.model),apiKeyConfigured:Boolean(c.apiKey),apiKeyMasked:c.apiKey?`${c.apiKey.slice(0,4)}••••${c.apiKey.slice(-4)}`:''});
+      }
+      if(path==='/api/admin/ai-config'&&req.method==='PUT'){
+        const b=await readBody(req),baseUrl=String(b.baseUrl||'').trim().replace(/\/+$/,''),model=String(b.model||'').trim(),timeoutMs=Number(b.timeoutMs||15000);
+        let parsed;try{parsed=new URL(baseUrl);}catch{throw new AppError('AI API 地址格式无效');}
+        if(!['http:','https:'].includes(parsed.protocol)||parsed.username||parsed.password||parsed.search||parsed.hash)throw new AppError('AI API 地址必须是无凭据的 HTTP(S) 根地址');
+        if(!['127.0.0.1','localhost','[::1]'].includes(parsed.hostname)&&parsed.protocol!=='https:')throw new AppError('非本机 AI API 必须使用 HTTPS');
+        if(!model||model.length>200)throw new AppError('AI 模型名称不能为空且不得超过 200 字');
+        if(!Number.isSafeInteger(timeoutMs)||timeoutMs<3000||timeoutMs>120000)throw new AppError('AI 超时时间须为 3000–120000 毫秒');
+        const saved=store.saveAIConfig({baseUrl,model,timeoutMs,apiKey:b.apiKey},user.id);
+        return send({baseUrl:saved.baseUrl,model:saved.model,timeoutMs:saved.timeoutMs,configured:Boolean(saved.baseUrl&&saved.apiKey&&saved.model),apiKeyConfigured:Boolean(saved.apiKey),apiKeyMasked:saved.apiKey?`${saved.apiKey.slice(0,4)}••••${saved.apiKey.slice(-4)}`:''});
+      }
+      if(path==='/api/admin/ai-config/models'&&req.method==='GET')return send({items:await service.ai.models()});
+      if(path==='/api/admin/ai-config/test'&&req.method==='POST')return send(await service.ai.test());
       if(path==='/api/admin/storage'&&req.method==='GET')return send(storage.info());
       if(path==='/api/admin/storage/preview'&&req.method==='POST')return send(storage.preview(user.id,await readBody(req)));
       if(path==='/api/admin/storage/cleanup'&&req.method==='POST'){
@@ -179,7 +210,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       }
       if (base === '/api/rules' && req.method === 'GET') {
         const r = store.rules();
-        return send(admin ? r : { version: r.version, applicationsEnabled: r.applicationsEnabled, executionEnabled: r.executionEnabled, selfServiceEnabled:r.selfServiceEnabled,selfServiceMaxQuota:r.selfServiceMaxQuota,selfServiceMinAgeSeconds:r.selfServiceMinAgeSeconds,timezone: r.timezone, dailyResetTime:r.dailyResetTime, models: r.models,restrictModels:r.restrictModels, refundBasisPoints: r.refundBasisPoints, perRecordQuota: r.perRecordQuota, userDailyQuota: r.userDailyQuota, userDailyCount: r.userDailyCount, maxPending: r.maxPending, applicationHours: r.applicationHours, lookbackDays:Math.ceil(r.applicationHours/24), openStart: r.openStart, openEnd: r.openEnd, consumptionStart: null, consumptionEnd: null });
+        return send(admin ? r : { version: r.version, applicationsEnabled: r.applicationsEnabled, executionEnabled: r.executionEnabled, selfServiceEnabled:r.selfServiceEnabled,aiEnabled:r.aiEnabled,aiAutoThreshold:r.aiAutoThreshold,selfServiceMaxQuota:r.selfServiceMaxQuota,selfServiceMinAgeSeconds:r.selfServiceMinAgeSeconds,timezone: r.timezone, dailyResetTime:r.dailyResetTime, models: r.models,restrictModels:r.restrictModels, refundBasisPoints: r.refundBasisPoints, perRecordQuota: r.perRecordQuota, userDailyQuota: r.userDailyQuota, userDailyCount: r.userDailyCount, maxPending: r.maxPending, applicationHours: r.applicationHours, lookbackDays:Math.ceil(r.applicationHours/24), openStart: r.openStart, openEnd: r.openEnd, consumptionStart: null, consumptionEnd: null });
       }
       if (admin && base === '/api/rules' && req.method === 'PUT') {
         const body=await readBody(req);
@@ -215,7 +246,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
     } catch (e) {
       res.statusCode = e instanceof AppError ? e.status : 500;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      res.end(JSON.stringify({ success: false, message: e instanceof AppError ? e.message : '服务内部错误，操作结果请查看处理记录' }));
+      res.end(JSON.stringify({ success: false, message: e instanceof AppError ? e.message : '服务内部错误，操作结果请查看处理记录', ...(e.code === 'ORIGIN_MISMATCH' ? { code: e.code, canonicalOrigin: expectedOrigin } : {}) }));
       if (!(e instanceof AppError)) console.error('Request failed:', e.name);
     }
   });

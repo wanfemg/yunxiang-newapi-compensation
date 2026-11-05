@@ -9,6 +9,37 @@ async function setup(t){const remote=await mockServer();const store=new Store();
   const request=async(path,{method='GET',body,cookie,csrf,requestOrigin=origin}={})=>{const res=await fetch(base+path,{method,headers:{'Content-Type':'application/json',Origin:requestOrigin,...(cookie?{Cookie:cookie}:{}),...(csrf?{'X-CSRF-Token':csrf}:{})},body:body===undefined?undefined:JSON.stringify(body)});return {status:res.status,json:await res.json(),cookie:res.headers.get('set-cookie')};};
   const login=async who=>{const out=await request('/api/auth/login',{method:'POST',body:{username:who.username,password:'fixture-password'}});assert.equal(out.status,200);return {cookie:out.cookie.split(';')[0],csrf:out.json.data.csrf};};return {remote,store,server,base,request,login};}
 
+test('旧版原站 Cookie 登录不向浏览器泄漏上游 Cookie，撤销账号立即阻断',async t=>{
+ const f=await setup(t);f.remote.data.legacyLogin=true;
+ const response=await f.request('/api/auth/login',{method:'POST',body:{username:user.username,password:'fixture-password'}});
+ assert.equal(response.status,200);assert.equal(response.json.data.user.id,7);
+ assert.ok(!JSON.stringify(response).includes('legacy-7'));
+ const cookie=response.cookie.split(';')[0];assert.equal((await f.request('/api/me',{cookie})).status,200);
+ f.remote.data.disabled=true;assert.equal((await f.request('/api/me',{cookie})).status,401);
+});
+
+test('保持登录使用 30 天会话，普通登录保持默认时长',async t=>{
+ const f=await setup(t);
+ const normal=await f.request('/api/auth/login',{method:'POST',body:{username:user.username,password:'fixture-password'}});
+ const remembered=await f.request('/api/auth/login',{method:'POST',body:{username:user.username,password:'fixture-password',remember:true}});
+ assert.match(normal.cookie,/Max-Age=28800/);
+ assert.match(remembered.cookie,/Max-Age=2592000/);
+});
+
+test('HTTP 渠道模型排除由站长保存，查询展示跳过摘要且伪造申请不能绕过',async t=>{
+ const f=await setup(t),a=await f.login(admin),u=await f.login(user);
+ const body={...f.store.rules(),excludedModels:[{channelId:3,model:'fixture-model'}]};
+ assert.equal((await f.request('/api/admin/rules',{...u,method:'PUT',body})).status,403);
+ const saved=await f.request('/api/admin/rules',{...a,method:'PUT',body});assert.equal(saved.status,200);
+ assert.deepEqual(saved.json.data.excludedModels,body.excludedModels);
+ assert.equal((await f.request('/api/rules',u)).json.data.excludedModels,undefined);
+ const query=await f.request('/api/logs',u);assert.equal(query.json.data.total,0);assert.equal(query.json.data.skippedCount,1);
+ assert.equal(query.json.data.skippedModels[0].model,'fixture-model');assert.equal(query.json.data.skippedModels[0].channelId,undefined);
+ const attempt=await f.request('/api/claims',{...u,method:'POST',body:{requestIds:['fixture-request-1']}});
+ assert.equal(attempt.json.data[0].success,false);assert.match(attempt.json.data[0].message,/不参与补偿/);
+ assert.equal(f.remote.data.credits.length,0);
+});
+
 test('数据库清理仅管理员可预览执行，要求 CSRF 和单次确认',async t=>{
  const f=await setup(t),a=await f.login(admin),u=await f.login(user);
  const body={cache:true,notifications:true,backups:false,compact:false,cacheDays:7,notificationDays:30,backupDays:30};

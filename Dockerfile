@@ -4,6 +4,8 @@ COPY package.json ./
 COPY src ./src
 COPY public ./public
 COPY test ./test
+COPY *.sh ./
+COPY Dockerfile .dockerignore ./
 RUN node --test test/*.test.mjs
 
 FROM node:24-bookworm-slim AS runtime

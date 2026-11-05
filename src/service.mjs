@@ -1,13 +1,14 @@
-import { AppError, assessLog, expectedQuota, isOpen, publicLog, positiveInt, validateRules, selfServiceDecision, fundingSource } from './rules.mjs';
+import { AppError, assessLog, expectedQuota, isOpen, publicLog, positiveInt, validateRules, selfServiceDecision, fundingSource, compensationLabel, modelExcluded } from './rules.mjs';
 import { UpstreamError } from './newapi.mjs';
 import { LogQueries } from './log-queries.mjs';
+import { AIReviewer, logFingerprint } from './ai-review.mjs';
 
 function text(value, label, max = 2000) {
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw new AppError(`${label}不能为空且不得超过 ${max} 字`);
   return value.trim();
 }
 export class Compensation {
-  constructor(store, upstream, clock = Date.now) { this.store = store; this.upstream = upstream; this.locks = new Set(); this.logQueries = new LogQueries(store, upstream, clock); }
+  constructor(store, upstream, clock = Date.now, ai = {}) { this.store = store; this.upstream = upstream; this.locks = new Set(); this.logQueries = new LogQueries(store, upstream, clock); this.ai = ai.reviewer || new AIReviewer({ store, now: clock }); }
   requireAdmin(user) { if (user.role < 10) throw new AppError('需要站长管理权限', 403); }
   async ruleContext(logs){
     const rules=this.store.rules();
@@ -23,19 +24,28 @@ export class Compensation {
     return c;
   }
   view(c, admin = false) {
-    if (admin) return {...c,fundingSource:fundingSource(c.log),expectedAmount:expectedQuota(c.log,c.rules)};
+    const aiReview = this.store.aiReview(c.request_id, logFingerprint(c.log), process.env.AI_PROMPT_VERSION || 'empty-v1');
+    if (admin) return {...c,fundingSource:fundingSource(c.log),compensationLabel:compensationLabel(c.log,c.source),expectedAmount:expectedQuota(c.log,c.rules),aiReview};
     const { rules, log, operator_id, attempt_id, verification_note, confirmed_unreturned, ...safe } = c;
-    return { ...safe, log: publicLog(log), fundingSource:fundingSource(log),ruleVersion: rules.version,expectedAmount:expectedQuota(log,rules) };
+    return { ...safe, log: publicLog(log), fundingSource:fundingSource(log),compensationLabel:compensationLabel(log,c.source),ruleVersion: rules.version,expectedAmount:expectedQuota(log,rules) };
   }
   async logs(user, query, admin = false) {
     if (admin) this.requireAdmin(user);
     let r = this.store.rules();
     let data;
+    const skipped = new Map();
+    const excludedKeys = new Set((r.excludedModels || []).map(entry=>JSON.stringify([entry.channelId,entry.model])));
     if (admin) {
       data = await this.upstream.logs({ user: null, page: query.page || 1, model: query.model || '', requestId: query.requestId || '', start: query.start || Math.floor(Date.now() / 1000 - r.applicationHours * 3600), end: query.end, channel: query.channel || '' });
     } else {
       const snapshot = await this.logQueries.read(user, query, r.applicationHours);
-      const visible = snapshot.items.filter(log => !log.request_id || this.store.byRequest(log.request_id)?.status !== 'succeeded');
+      const visible = snapshot.items.filter(log => {
+        if (log.request_id && this.store.byRequest(log.request_id)?.status === 'succeeded') return false;
+        if (!excludedKeys.has(JSON.stringify([log.channel,log.model_name]))) return true;
+        const entry = skipped.get(log.model_name) || { model: log.model_name, count: 0, reason: '该模型不参与补偿，已跳过空回检测' };
+        entry.count++; skipped.set(log.model_name, entry);
+        return false;
+      });
       const page = query.page || 1;
       data = { items: visible.slice((page - 1) * 30, page * 30), total: visible.length, page, syncedAt: snapshot.syncedAt };
     }
@@ -52,13 +62,14 @@ export class Compensation {
       const decision=selfServiceDecision(log,{id:log.user_id},r);
       return { log: admin ? log : publicLog(log), assessment: { ...assessment, reasons, canApply: assessment.eligible && reasons.length === 0, route:decision.automatic?'automatic':'review', reviewReasons:decision.reasons }, claim: c ? { id: c.id, status: c.status } : null };
     });
-    return { ...data, items };
+    return { ...data, items, skippedModels: [...skipped.values()].sort((a,b)=>a.model.localeCompare(b.model)), skippedCount: [...skipped.values()].reduce((sum,entry)=>sum+entry.count,0) };
   }
   async apply(user, requestId, reason, manual = false, selfService = false, runId = null) {
     text(requestId, '请求标识', 200); reason = text(reason, '申请依据');
     if (manual) this.requireAdmin(user);
     const log = await this.upstream.log(requestId);
     if (!manual && log.user_id !== user.id) throw new AppError('只能申请本人的消费', 403);
+    if (modelExcluded(log, this.store.rules())) throw new AppError('该模型不参与补偿，已跳过空回检测');
     const owner = manual ? await this.upstream.target(log.user_id) : user;
     positiveInt(owner.id);
     if (owner.id !== log.user_id || owner.status === 2) throw new AppError('原消费用户不可用');
@@ -97,12 +108,45 @@ export class Compensation {
       if(error.status===409&&current?.user_id===user.id)return this.view(current);
       throw error;
     }
-    const claim=this.store.get(created.id),decision=selfServiceDecision(claim.log,user,await this.ruleContext([this.store.get(created.id).log]));
+    const claim=this.store.get(created.id);
+    let aiReview = null;
+    const activeRules = this.store.rules();
+    if (activeRules.aiEnabled) {
+      this.store.event(claim.id,user.id,'ai_review_started',{promptVersion:process.env.AI_PROMPT_VERSION||'empty-v1'});
+      this.store.notifyClaim('ai_reviewing',claim,'正在读取日志、补偿规则与重复申请记录');
+      try {
+        aiReview = await this.ai.review(claim.log, activeRules);
+      } catch (error) {
+        aiReview = this.store.saveAiReview({
+          requestId: claim.request_id,
+          userId: claim.user_id,
+          fingerprint: logFingerprint(claim.log),
+          promptVersion: process.env.AI_PROMPT_VERSION || 'empty-v1',
+          decision: 'uncertain',
+          confidence: 0,
+          reason: error instanceof AppError ? error.message : 'AI 服务暂不可用，转管理员审核',
+          evidence: [],
+          rawResponse: null,
+          status: 'fallback'
+        });
+      }
+    }
+    const decision=selfServiceDecision(claim.log,user,await this.ruleContext([claim.log]),Date.now(),aiReview);
+    if (aiReview) {
+      this.store.event(claim.id,user.id,'ai_reviewed',{decision:aiReview.decision,confidence:aiReview.confidence,reason:aiReview.reason,status:aiReview.status});
+      const confidence = `${Math.round(Number(aiReview.confidence || 0) * 100)}%`;
+      this.store.notifyClaim('ai_reviewed',claim,`AI 判定：${aiReview.decision}，置信度 ${confidence}。${aiReview.reason}`);
+    }
     this.store.event(claim.id,user.id,'self_service_routed',{route:decision.automatic?'automatic':'review',reasons:decision.reasons});
-    if(!decision.automatic)return this.view(this.store.transition(claim.id,['pending'],'pending',user.id,'异常转审批：'+decision.reasons.join('；')));
+    if(!decision.automatic){
+      if(aiReview) this.store.notifyClaim('ai_manual_review',claim,`证据不足或未达到自动阈值，转管理员审核。${decision.reasons.join('；')}`);
+      return this.view(this.store.transition(claim.id,['pending'],'pending',user.id,'异常转审批：'+decision.reasons.join('；')));
+    }
     try{
       this.store.transition(claim.id,['pending'],'approved',user.id,'系统自助核验通过，待二次核验');
-      return this.view(await this.#execute(user,claim.id,claim.log.quota,'系统自助：明确空回标记、余额扣费、规则与限额核验',true));
+      const result=await this.#execute(user,claim.id,claim.log.quota,'系统自助：空回证据、AI 判定、余额扣费、规则与限额核验',true);
+      if(aiReview&&result.status==='succeeded')this.store.notifyClaim('ai_auto_compensation',result,`AI 高置信度判定为空回并已确认补额度。${aiReview.reason}`);
+      return this.view(result);
     }catch(error){
       const current=this.store.get(claim.id);
       if(current.status==='executing')return this.view(this.store.transition(claim.id,['executing'],'unknown',user.id,'自助返还结果未确认，禁止重试，须人工对账'));
@@ -131,9 +175,10 @@ export class Compensation {
       if (!rules.executionEnabled) throw new AppError('补偿执行暂未开放');
       if(automatic){
         if(!rules.applicationsEnabled||!isOpen(rules,Date.now()))throw new AppError('自助补偿开放时间或开关已变更');
-        const decision=selfServiceDecision(original,{id:c.user_id},rules);
+        const aiReview = this.store.aiReview(c.request_id, logFingerprint(original), process.env.AI_PROMPT_VERSION || 'empty-v1');
+        const decision=selfServiceDecision(original,{id:c.user_id},rules,Date.now(),aiReview);
         if(!decision.automatic)throw new AppError(decision.reasons.join('；'));
-        const originalDecision=selfServiceDecision(original,{id:c.user_id},{...rules,selfServiceMaxQuota:Math.min(rules.selfServiceMaxQuota,c.rules.selfServiceMaxQuota),selfServiceMinAgeSeconds:Math.max(rules.selfServiceMinAgeSeconds,c.rules.selfServiceMinAgeSeconds)});
+        const originalDecision=selfServiceDecision(original,{id:c.user_id},{...rules,selfServiceMaxQuota:Math.min(rules.selfServiceMaxQuota,c.rules.selfServiceMaxQuota),selfServiceMinAgeSeconds:Math.max(rules.selfServiceMinAgeSeconds,c.rules.selfServiceMinAgeSeconds)},Date.now(),aiReview);
         if(!originalDecision.automatic)throw new AppError(originalDecision.reasons.join('；'));
       }
       const a = assessLog(original, { id: c.user_id }, rules);

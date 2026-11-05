@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { defaults, AppError, settlementClock, expectedQuota, fundingSource } from './rules.mjs';
+import { defaults, AppError, settlementClock, expectedQuota, fundingSource, compensationLabel } from './rules.mjs';
 import {formatQuota} from '../public/display.js';
 
 export class Store {
@@ -15,6 +15,15 @@ export class Store {
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, claim_id TEXT, actor_id INTEGER NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY, event TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, result TEXT, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS log_query_cache (cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS ai_reviews (
+        id TEXT PRIMARY KEY, request_id TEXT NOT NULL, user_id INTEGER NOT NULL,
+        log_fingerprint TEXT NOT NULL, prompt_version TEXT NOT NULL,
+        decision TEXT NOT NULL, confidence REAL NOT NULL, reason TEXT NOT NULL,
+        evidence TEXT NOT NULL, raw_response TEXT, status TEXT NOT NULL,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE(request_id, log_fingerprint, prompt_version)
+      );
+      CREATE INDEX IF NOT EXISTS ai_reviews_user_day ON ai_reviews(user_id, created_at);
     `);
     if(!this.db.prepare('PRAGMA table_info(claims)').all().some(c=>c.name==='run_id'))this.db.exec('ALTER TABLE claims ADD COLUMN run_id TEXT');
     if(!this.db.prepare('PRAGMA table_info(claims)').all().some(c=>c.name==='reserved_at')){
@@ -48,6 +57,31 @@ export class Store {
     try { const value = fn(); this.db.exec('COMMIT'); return value; } catch (e) { this.db.exec('ROLLBACK'); throw e; }
   }
   rules() { return {...structuredClone(defaults), ...JSON.parse(this.db.prepare('SELECT value FROM settings WHERE id=1').get().value)}; }
+  aiConfig() {
+    const row = this.db.prepare("SELECT value FROM metadata WHERE key='ai_config'").get();
+    let saved = {};
+    try { saved = row ? JSON.parse(row.value) : {}; } catch {}
+    return {
+      baseUrl: String(saved.baseUrl || process.env.AI_BASE_URL || '').trim(),
+      apiKey: String(saved.apiKey || process.env.AI_API_KEY || ''),
+      model: String(saved.model || process.env.AI_MODEL || '').trim(),
+      timeoutMs: Number(saved.timeoutMs || process.env.AI_TIMEOUT_MS || 15000)
+    };
+  }
+  saveAIConfig(input, actor) {
+    return this.transaction(() => {
+      const current = this.aiConfig();
+      const next = {
+        baseUrl: String(input.baseUrl ?? current.baseUrl).trim().replace(/\/+$/, ''),
+        apiKey: input.apiKey === undefined || input.apiKey === '' ? current.apiKey : String(input.apiKey),
+        model: String(input.model ?? current.model).trim(),
+        timeoutMs: Number(input.timeoutMs ?? current.timeoutMs)
+      };
+      this.db.prepare("INSERT OR REPLACE INTO metadata(key,value) VALUES('ai_config',?)").run(JSON.stringify(next));
+      this.event(null, actor, 'ai_config_updated', { baseUrl: next.baseUrl, model: next.model, timeoutMs: next.timeoutMs, apiKeyChanged: next.apiKey !== current.apiKey });
+      return next;
+    });
+  }
   saveRules(rules, actor, expectedVersion) {
     return this.transaction(() => {
       const current = this.rules();
@@ -74,14 +108,14 @@ export class Store {
     this.db.prepare('INSERT INTO notifications(event,body,next_at,created_at) VALUES(?,?,?,?)').run(event, body, Date.now(), Date.now());
   }
   notifyClaim(event,claim,note){
-    const titles={application_pending:'空回补额度待审核',review_result:'空回补额度审核结果',compensation_success:'空回补额度成功',execution_failed:'空回补额度失败',execution_unknown:'空回补额度待对账'};
+    const titles={application_pending:'空回补额度待审核',review_result:'空回补额度审核结果',compensation_success:'空回补额度成功',execution_failed:'空回补额度失败',execution_unknown:'空回补额度待对账',ai_reviewing:'AI 空回审查开始',ai_reviewed:'AI 空回审查结果',ai_auto_compensation:'AI 审查通过 · 自动补额度',ai_manual_review:'AI 审查不确定 · 转人工审核'};
     const safe=value=>String(value??'').replace(/[\\`*_{}\[\]()<>#!|@]/g,' ').replace(/[\r\n]+/g,' ').slice(0,500);
     let display;try{display=JSON.parse(this.db.prepare("SELECT value FROM metadata WHERE key='display'").get()?.value);}catch{}
     const label={pending:'待人工审核',approved:'已通过，等待执行',succeeded:'已补回',failed:'返还失败',unknown:'待人工对账',rejected:'已驳回',executing:'执行中'}[claim.status]||claim.status;
     const amount=claim.status==='succeeded'?claim.amount:claim.amount||expectedQuota(claim.log,claim.rules);
     const title=titles[event]||'空回补额度通知';
     const text='### '+title+'\n'+[
-      ['申请号',claim.id],['用户',claim.username+'（ID '+claim.user_id+'）'],['类型',fundingSource(claim.log)==='subscription'?'订阅空回 · 余额补偿':claim.source==='manual'?'人工补偿':'空回补额度'],['模型',claim.log.model_name],['原请求',claim.request_id],['补回额度',display?formatQuota(amount,display):'站点显示配置待同步'],['状态',label],['处理说明',note],['时间',new Date().toLocaleString('zh-CN',{timeZone:this.rules().timezone,hour12:false})]
+      ['申请号',claim.id],['用户',claim.username+'（ID '+claim.user_id+'）'],['类型',compensationLabel(claim.log,claim.source)],['模型',claim.log.model_name],['原请求',claim.request_id],['补回额度',display?formatQuota(amount,display):'站点显示配置待同步'],['状态',label],['处理说明',note],['时间',new Date().toLocaleString('zh-CN',{timeZone:this.rules().timezone,hour12:false})]
     ].map(([key,value])=>'- **'+key+'**：'+safe(value)).join('\n');
     this.notify(event,JSON.stringify({title,text}));
   }
@@ -98,6 +132,25 @@ export class Store {
       this.db.prepare('DELETE FROM log_query_cache WHERE created_at<?').run(now - 86400000);
       this.db.prepare('INSERT INTO log_query_cache(cache_key,payload,created_at) VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload,created_at=excluded.created_at').run(key, JSON.stringify(payload), now);
       this.db.exec('DELETE FROM log_query_cache WHERE cache_key NOT IN (SELECT cache_key FROM log_query_cache ORDER BY created_at DESC LIMIT 200)');
+    });
+  }
+  aiReview(requestId, fingerprint, promptVersion) {
+    const row = this.db.prepare('SELECT * FROM ai_reviews WHERE request_id=? AND log_fingerprint=? AND prompt_version=?').get(requestId, fingerprint, promptVersion);
+    return row ? { ...row, evidence: JSON.parse(row.evidence) } : null;
+  }
+  aiReviewCount(day, userId) {
+    const start = Date.parse(day + 'T00:00:00.000Z'), end = start + 86400000;
+    return this.db.prepare('SELECT COUNT(*) AS n FROM ai_reviews WHERE user_id=? AND created_at>=? AND created_at<?').get(userId, start, end).n;
+  }
+  saveAiReview(input) {
+    return this.transaction(() => {
+      const now = Date.now();
+      const existing = this.aiReview(input.requestId, input.fingerprint, input.promptVersion);
+      if (existing) return existing;
+      const id = randomUUID();
+      this.db.prepare('INSERT INTO ai_reviews(id,request_id,user_id,log_fingerprint,prompt_version,decision,confidence,reason,evidence,raw_response,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id, input.requestId, input.userId, input.fingerprint, input.promptVersion, input.decision, input.confidence, input.reason, JSON.stringify(input.evidence || []), input.rawResponse, input.status, now, now);
+      return this.aiReview(input.requestId, input.fingerprint, input.promptVersion);
     });
   }
   list(userId = null, status = '', page = 1, filters = {}) {

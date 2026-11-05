@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>云响 · 加载与等待动效预览</title>
+  <style>
+    :root{font-family:Inter,"Microsoft YaHei",sans-serif;color-scheme:dark;--bg:#111827;--ink:#f7f9ff;--muted:#bac7dc;--glass:rgba(31,43,68,.76);--line:rgba(187,205,255,.2);--field:rgba(38,52,80,.8);--accent:#a9bdff;--accent2:#cfc4ff;--success:#a9bdff;--danger:#ff9caa;--shine:rgba(217,228,255,.2);background:var(--bg);color:var(--ink)}
+    :root[data-theme=light]{color-scheme:light;--bg:#edf2f8;--ink:#1a2940;--muted:#5d6e87;--glass:rgba(255,255,255,.72);--line:rgba(255,255,255,.9);--field:rgba(248,250,255,.8);--accent:#536fce;--accent2:#8172c9;--success:#536fce;--danger:#b84961;--shine:rgba(84,111,206,.16)}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 15% 0%,color-mix(in srgb,var(--accent) 17%,transparent),transparent 48%),radial-gradient(ellipse at 95% 90%,color-mix(in srgb,var(--accent2) 13%,transparent),transparent 48%),var(--bg);color:var(--ink);padding:32px 20px}
+    main{max-width:920px;margin:0 auto}header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:26px}header strong{font-size:17px}header p{margin:5px 0 0;color:var(--muted);font-size:12px}
+    button{font:inherit;color:var(--ink);background:var(--field);border:1px solid var(--line);border-radius:8px;min-height:42px;padding:9px 13px;cursor:pointer}button:hover{background:color-mix(in srgb,var(--accent) 14%,var(--field))}button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    .theme{width:42px;height:42px;padding:0;font-size:18px}.layout{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(230px,.75fr);gap:18px}
+    .glass{border:1px solid var(--line);border-radius:16px;background:var(--glass);backdrop-filter:blur(24px) saturate(145%);box-shadow:inset 0 1px rgba(255,255,255,.16),0 18px 55px rgba(20,34,65,.13)}
+    .demo{padding:30px;min-height:430px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+    .visual{width:112px;height:112px;display:grid;place-items:center;position:relative;margin-bottom:24px}.halo,.halo:after{position:absolute;inset:0;border:1px solid var(--line);border-radius:50%}.halo:after{content:"";inset:8px;border-style:dashed;animation:orbit 9s linear infinite}
+    .ring{position:absolute;inset:5px;border:2px solid transparent;border-top-color:var(--accent);border-right-color:color-mix(in srgb,var(--accent) 25%,transparent);border-radius:50%;animation:orbit 1.7s linear infinite}
+    .core{width:70px;height:70px;border-radius:22px;background:color-mix(in srgb,var(--accent) 15%,transparent);color:var(--accent);display:grid;place-items:center;box-shadow:0 0 40px color-mix(in srgb,var(--accent) 20%,transparent);animation:breathe 2.4s ease-in-out infinite}
+    .core svg{width:34px;height:34px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}.check,.cross{display:none}
+    h1{font-size:22px;margin:0 0 8px}.description{font-size:13px;color:var(--muted);margin:0;line-height:1.7;max-width:440px;min-height:44px}
+    .track{width:min(410px,100%);height:4px;border-radius:4px;background:var(--field);overflow:hidden;margin:24px 0}.beam{height:100%;width:32%;background:linear-gradient(90deg,transparent,var(--accent),var(--accent2),transparent);animation:scan 1.8s ease-in-out infinite}
+    .skeleton{width:min(410px,100%);display:grid;gap:9px}.skeleton i{height:10px;border-radius:6px;background:linear-gradient(100deg,transparent,var(--shine),transparent);background-size:220% 100%;animation:shimmer 1.8s linear infinite}.skeleton i:nth-child(2){width:78%}.skeleton i:nth-child(3){width:54%}
+    .success-copy,.error-copy{display:none;margin-top:14px;font-weight:650}.success-copy{color:var(--success)}.error-copy{color:var(--danger)}.error-reason{display:none;max-width:440px;margin:8px auto 0;color:var(--muted);font-size:12px;line-height:1.7}
+    .done .ring,.failed .ring{display:none}.done .check,.failed .cross{display:block}.done .cloud,.failed .cloud{display:none}.done .core,.failed .core{animation:pop .35s ease-out}.done .core{color:var(--success)}.failed .core{color:var(--danger)}.done .skeleton,.failed .skeleton{display:none}.done .success-copy,.failed .error-copy{display:block}.done .beam{width:100%;animation:none;background:var(--success)}.failed .beam{width:100%;animation:none;background:var(--danger)}
+    aside{padding:20px}.eyebrow{display:block;font-size:11px;font-weight:650;color:var(--accent);margin-bottom:7px}.side-title{font-size:15px;margin:0 0 15px}.states{display:grid;gap:8px}.states button{text-align:left;display:flex;align-items:center;gap:10px}.states button[aria-pressed=true]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,var(--field))}.state-icon{width:25px;height:25px;border-radius:7px;background:color-mix(in srgb,var(--accent) 13%,transparent);display:grid;place-items:center;color:var(--accent)}
+    .note{border-top:1px solid var(--line);margin-top:18px;padding-top:14px;color:var(--muted);font-size:11px;line-height:1.75}.note strong{color:var(--ink)}
+    @keyframes orbit{to{transform:rotate(360deg)}}@keyframes breathe{50%{transform:scale(.94);opacity:.7}}@keyframes scan{from{transform:translateX(-120%)}to{transform:translateX(420%)}}@keyframes shimmer{to{background-position:-220% 0}}@keyframes pop{from{transform:scale(.82);opacity:.5}to{transform:scale(1);opacity:1}}
+    /* Refined motion: slower orbital paths, softer refraction, and quieter completion feedback. */
+    .halo{inset:4px;transform:rotateX(62deg) rotate(-28deg);border-color:color-mix(in srgb,var(--accent) 20%,transparent)}
+    .halo:after{inset:-7px;border-style:solid;border-color:color-mix(in srgb,var(--accent2) 18%,transparent);border-left-color:transparent;border-bottom-color:transparent;animation:orbit 18s linear infinite}
+    .ring{inset:1px;border-width:1.5px;animation:orbit 5.8s cubic-bezier(.45,.05,.55,.95) infinite}
+    .core{position:relative;overflow:hidden;width:68px;height:68px;border:1px solid color-mix(in srgb,var(--accent) 34%,transparent);border-radius:50%;background:radial-gradient(circle at 34% 24%,rgba(255,255,255,.34),transparent 22%),radial-gradient(circle at 68% 76%,color-mix(in srgb,var(--accent2) 28%,transparent),transparent 54%),color-mix(in srgb,var(--accent) 12%,var(--glass));box-shadow:inset 0 1px 8px rgba(255,255,255,.16),0 0 42px color-mix(in srgb,var(--accent) 15%,transparent);animation:breathe 4.2s ease-in-out infinite}
+    .core:before{content:"";position:absolute;inset:-30% -70%;background:linear-gradient(112deg,transparent 42%,rgba(255,255,255,.11) 49%,transparent 57%);transform:translateX(-30%);animation:refraction 6.5s ease-in-out infinite}
+    .core svg{position:relative;z-index:1;width:31px;height:31px;filter:drop-shadow(0 1px 7px color-mix(in srgb,var(--accent) 35%,transparent))}
+    .track{height:2px;background:color-mix(in srgb,var(--accent) 9%,var(--field));margin:25px 0 22px}
+    .beam{width:28%;opacity:.8;animation:scan 2.6s cubic-bezier(.4,0,.2,1) infinite}
+    .skeleton i{height:8px;opacity:.72;animation:shimmer 2.7s ease-in-out infinite}
+    .done .core,.failed .core{animation:soft-arrive .48s cubic-bezier(.2,.75,.25,1) both}
+    .done .ring,.failed .ring{display:none}.done .halo:after,.failed .halo:after{inset:3px;border:1px solid currentColor;opacity:.26;animation:soft-arrive .5s ease-out both}
+    .done .beam,.failed .beam{opacity:.56;transition:opacity .35s ease}
+    .success-copy,.error-copy{font-weight:550;animation:soft-arrive .45s ease both}
+    @keyframes refraction{0%,100%{transform:translateX(-30%);opacity:.2}50%{transform:translateX(30%);opacity:.65}}
+    @keyframes soft-arrive{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
+    @media(max-width:700px){body{padding:20px 14px}header{margin-bottom:18px}.layout{grid-template-columns:1fr}.demo{min-height:365px;padding:24px 18px}aside{padding:16px}.states{grid-template-columns:1fr 1fr}.states button{font-size:12px;padding:8px}.side-title{margin-bottom:12px}}
+    @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}
+  </style>
+</head>
+<body>
+  <main>
+    <header><div><strong>云响 · 加载与等待动效</strong><p>交互示例 · 仅演示状态，不发起查询或补偿</p></div><button class="theme" id="theme" aria-label="切换亮色主题" title="切换亮暗主题">☼</button></header>
+    <div class="layout">
+      <section class="glass demo" id="demo" aria-busy="true">
+        <div class="visual" aria-hidden="true"><div class="halo"></div><div class="ring"></div><div class="core">
+          <svg class="cloud" viewBox="0 0 24 24"><path d="M7 18a4 4 0 0 1-.4-8 5.5 5.5 0 0 1 10.6-1.2A4.5 4.5 0 1 1 18 18Z"/><path d="M12 11v6m-3-3 3 3 3-3"/></svg>
+          <svg class="check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>
+          <svg class="cross" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17"/></svg>
+        </div></div>
+        <h1 id="title">正在查询消费记录</h1><p class="description" id="description">正在读取原账号近期消费，请稍候。</p>
+        <div class="track" aria-hidden="true"><div class="beam"></div></div>
+        <div class="skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
+        <p class="success-copy">已确认完成，记录已更新</p><p class="error-copy">处理失败，已显示失败原因</p><p class="error-reason">失败原因：原站返还请求未确认，已转入待对账处理。</p>
+      </section>
+      <aside class="glass"><span class="eyebrow">状态预览</span><h2 class="side-title">选择动效状态</h2>
+        <div class="states">
+          <button data-state="query" aria-pressed="true"><span class="state-icon">⌕</span>查询等待</button>
+          <button data-state="verify" aria-pressed="false"><span class="state-icon">◌</span>核验等待</button>
+          <button data-state="ai-review" aria-pressed="false"><span class="state-icon">✦</span>AI 审查</button>
+          <button data-state="ai-success" aria-pressed="false"><span class="state-icon">✓</span>AI 通过</button>
+          <button data-state="success" aria-pressed="false"><span class="state-icon">✓</span>成功反馈</button>
+          <button data-state="error" aria-pressed="false"><span class="state-icon">!</span>失败反馈</button>
+        </div>
+        <div class="note"><strong>动效原则</strong><br>等待中显示柔和环形流动与内容骨架，不伪造进度百分比；成功和失败由真实接口结果切换。尊重系统减少动态效果设置。</div>
+      </aside>
+    </div>
+  </main>
+  <script>
+    const demo=document.querySelector('#demo'),title=document.querySelector('#title'),description=document.querySelector('#description'),reason=document.querySelector('.error-reason');
+    const states={query:['正在查询消费记录','正在读取原账号近期消费，请稍候。',''],verify:['正在核验补偿资格','正在核对扣费、模型与重复申请状态。',''], 'ai-review':['正在进行 AI 空回审查','正在综合日志、补偿规则与历史申请记录。',''], 'ai-success':['AI 审查通过，补偿处理中','已达到自动判定阈值，正在安全核验并补回额度。','done'],success:['补偿处理成功','已确认完成，记录已更新。','done'],error:['处理失败','补额度未完成，已进入失败处理状态。','failed']};
+    document.querySelectorAll('[data-state]').forEach(button=>button.addEventListener('click',()=>{const [heading,copy,mode]=states[button.dataset.state];title.textContent=heading;description.textContent=copy;reason.hidden=button.dataset.state!=='error';demo.classList.remove('done','failed');if(mode)demo.classList.add(mode);demo.setAttribute('aria-busy',String(!mode));document.querySelectorAll('[data-state]').forEach(item=>item.setAttribute('aria-pressed',String(item===button)))}));
+    document.querySelector('#theme').addEventListener('click',event=>{const root=document.documentElement,light=root.dataset.theme!=='light';root.dataset.theme=light?'light':'dark';event.currentTarget.setAttribute('aria-label',light?'切换暗色主题':'切换亮色主题');event.currentTarget.textContent=light?'☾':'☼'});
+  </script>
+</body>
+</html>
