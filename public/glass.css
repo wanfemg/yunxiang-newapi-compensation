@@ -105,9 +105,11 @@ table{font-size:14px}th{font-size:13px;color:var(--muted);background:var(--raise
 .ai-config-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:18px}
 .ai-config-actions button{display:inline-flex;align-items:center;gap:8px}
 .ai-config-actions svg{width:16px;height:16px}
+#ai-config-message{flex-basis:100%;min-width:0;overflow-wrap:anywhere;white-space:pre-wrap}
+.admin-ai-assist{margin-bottom:20px;padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--raised)}.ai-assist-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.ai-assist-heading h3{margin:0}.ai-assist-heading button{display:inline-flex;align-items:center;gap:8px}.ai-assist-heading svg{width:16px;height:16px}.admin-ai-assist p{margin:12px 0 0;overflow-wrap:anywhere}
 .success-text{color:var(--good)!important}
 @media(max-width:900px){.ai-config-grid{grid-template-columns:1fr 1fr}}
-@media(max-width:600px){.settings-title-row{gap:10px}.ai-config-grid{grid-template-columns:1fr}.ai-config-actions{align-items:stretch}.ai-config-actions button{flex:1;justify-content:center}}
+@media(max-width:600px){.settings-title-row{gap:10px}.ai-config-grid{grid-template-columns:1fr}.ai-config-actions{align-items:stretch}.ai-config-actions button{flex:1 1 160px;justify-content:center;white-space:nowrap}.ai-config-actions svg{flex:none}}
 
 /* Final contrast calibration: blue-violet success states and readable claim details. */
 :root{--good:#b8c7ff;--accent-2:#d2c7ff;--muted:#d0d9e9}

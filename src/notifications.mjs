@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { AppError } from './rules.mjs';
+import {notificationMarkdown} from './notification-titles.mjs';
 
 export class DingTalk {
   constructor(store, directory, fetcher = fetch) {
@@ -55,8 +56,7 @@ export class DingTalk {
         url.searchParams.set('sign', createHmac('sha256', config.secret).update(`${timestamp}\n${config.secret}`).digest('base64'));
         let success = false;
         try {
-          let markdown;try{markdown=JSON.parse(row.body);}catch{}
-          if(!markdown||typeof markdown.title!=='string'||typeof markdown.text!=='string')markdown={title:'云中猫API小站 补空回通知',text:'### 云中猫API小站 补空回通知\n\n'+String(row.body).replace(/[<>@]/g,' ')};
+          const markdown=notificationMarkdown(row);
           const response = await this.fetcher(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ msgtype: 'markdown', markdown,at:{isAtAll:false} }), redirect: 'error', signal: AbortSignal.timeout(8000) });
           success = response.ok && (await response.json()).errcode === 0;
         } catch {}

@@ -1,7 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID, createHash } from 'node:crypto';
-import { defaults, AppError, settlementClock, expectedQuota, fundingSource, compensationLabel } from './rules.mjs';
+import { defaults, AppError, settlementClock, expectedQuota, fundingSource, compensationLabel, validateRules } from './rules.mjs';
 import {formatQuota} from '../public/display.js';
+import {notificationTitle,batchNotificationTitle} from './notification-titles.mjs';
 
 export class Store {
   constructor(path = ':memory:') {
@@ -66,20 +67,25 @@ export class Store {
     const result={...structuredClone(defaults),...saved,notifications:{...defaults.notifications,...saved.notifications},emailNotifications:{...defaults.emailNotifications,...saved.emailNotifications}};
     return result;
   }
-  aiConfig() {
+  aiConfig(env = process.env) {
     const row = this.db.prepare("SELECT value FROM metadata WHERE key='ai_config'").get();
     let saved = {};
     try { saved = row ? JSON.parse(row.value) : {}; } catch {}
     return {
-      baseUrl: String(saved.baseUrl || process.env.AI_BASE_URL || '').trim(),
-      apiKey: String(saved.apiKey || process.env.AI_API_KEY || ''),
-      model: String(saved.model || process.env.AI_MODEL || '').trim(),
-      timeoutMs: Number(saved.timeoutMs || process.env.AI_TIMEOUT_MS || 15000),
-      prompt: String(saved.prompt || process.env.AI_PROMPT || '').trim()
+      baseUrl: String(saved.baseUrl ?? env.AI_BASE_URL ?? '').trim(),
+      apiKey: String(saved.apiKey ?? env.AI_API_KEY ?? ''),
+      model: String(saved.model ?? env.AI_MODEL ?? '').trim(),
+      timeoutMs: Number(saved.timeoutMs ?? env.AI_TIMEOUT_MS ?? 15000),
+      prompt: String(saved.prompt ?? env.AI_PROMPT ?? '').trim()
     };
   }
   saveAIConfig(input, actor) {
     return this.transaction(() => {
+      const currentRules=this.rules();
+      const ruleFields=['aiEnabled','aiAutoThreshold','aiDailyLimit'];
+      const changesRules=ruleFields.some(key=>Object.hasOwn(input,key));
+      if(changesRules&&input.rulesVersion!==currentRules.version)throw new AppError('AI 设置已更新，请刷新后重新保存',409);
+      const updatedRules=changesRules?validateRules({...currentRules,...Object.fromEntries(ruleFields.filter(key=>Object.hasOwn(input,key)).map(key=>[key,input[key]]))}):null;
       const current = this.aiConfig();
       const next = {
         baseUrl: String(input.baseUrl ?? current.baseUrl).trim().replace(/\/+$/, ''),
@@ -89,7 +95,8 @@ export class Store {
         prompt: String(input.prompt ?? current.prompt).trim()
       };
       this.db.prepare("INSERT OR REPLACE INTO metadata(key,value) VALUES('ai_config',?)").run(JSON.stringify(next));
-      this.event(null, actor, 'ai_config_updated', { baseUrl: next.baseUrl, model: next.model, timeoutMs: next.timeoutMs, apiKeyChanged: next.apiKey !== current.apiKey });
+      if(updatedRules)this.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify({...updatedRules,version:currentRules.version+1}));
+      this.event(null, actor, 'ai_config_updated', { baseUrl: next.baseUrl, model: next.model, timeoutMs: next.timeoutMs, apiKeyChanged: next.apiKey !== current.apiKey,...(updatedRules?{aiEnabled:updatedRules.aiEnabled,aiAutoThreshold:updatedRules.aiAutoThreshold,aiDailyLimit:updatedRules.aiDailyLimit}:{}) });
       return next;
     });
   }
@@ -123,12 +130,11 @@ export class Store {
   }
   notifyClaim(event,claim,note){
     if(claim.run_id)return;
-    const titles={application_pending:'空回补额度待审核',review_result:'空回补额度审核结果',compensation_success:'空回补额度成功',execution_failed:'空回补额度失败',execution_unknown:'空回补额度待对账',ai_reviewing:'AI 空回审查开始',ai_reviewed:'AI 空回审查结果',ai_auto_compensation:'AI 审查通过 · 自动补额度',ai_manual_review:'AI 审查不确定 · 转人工审核'};
     const safe=value=>String(value??'').replace(/[\\`*_{}\[\]()<>#!|@]/g,' ').replace(/[\r\n]+/g,' ').slice(0,500);
     let display;try{display=JSON.parse(this.db.prepare("SELECT value FROM metadata WHERE key='display'").get()?.value);}catch{}
     const label={pending:'待人工审核',approved:'已通过，等待执行',succeeded:'已补回',failed:'返还失败',unknown:'待人工对账',rejected:'已驳回',executing:'执行中'}[claim.status]||claim.status;
     const amount=claim.status==='succeeded'?claim.amount:claim.amount||expectedQuota(claim.log,claim.rules);
-    const title=titles[event]||'空回补额度通知';
+    const title=notificationTitle(event,claim.status);
     const text='### '+title+'\n'+[
       ['申请号',claim.id],['用户',claim.username+'（ID '+claim.user_id+'）'],['类型',compensationLabel(claim.log,claim.source)],['模型',claim.log.model_name],['原请求',claim.request_id],['补回额度',display?formatQuota(amount,display):'站点显示配置待同步'],['状态',label],['处理说明',note],['时间',new Date().toLocaleString('zh-CN',{timeZone:this.rules().timezone,hour12:false})]
     ].map(([key,value])=>'- **'+key+'**：'+safe(value)).join('\n');
@@ -142,7 +148,8 @@ export class Store {
     const labels={pending:'待人工审核',approved:'已通过 · 待执行',executing:'执行中',succeeded:'已补回',failed:'返还失败',unknown:'待人工对账',rejected:'已驳回'};
     let display;try{display=JSON.parse(this.db.prepare("SELECT value FROM metadata WHERE key='display'").get()?.value);}catch{}
     const succeeded=claims.filter(c=>c.status==='succeeded'),total=succeeded.reduce((sum,c)=>sum+c.amount,0);
-    const title=claims.length>1?`空回补偿批次处理结果（${claims.length} 笔）`:'空回补偿处理结果';
+    const hasAI=claims.some(claim=>this.db.prepare("SELECT 1 FROM events WHERE claim_id=? AND action IN ('ai_reviewed','admin_ai_reviewed') LIMIT 1").get(claim.id));
+    const title=batchNotificationTitle(claims,hasAI);
     const rows=claims.map(c=>`- **${safe(c.log.model_name)}** · ${safe(c.request_id)} · ${labels[c.status]||safe(c.status)} · ${display?formatQuota(c.status==='succeeded'?c.amount:expectedQuota(c.log,c.rules),display):c.status==='succeeded'?c.amount:expectedQuota(c.log,c.rules)}${c.review_note?' · '+safe(c.review_note):''}`);
     const text='### '+title+'\n'+[
       `- **用户**：${safe(claims[0].username)}（ID ${claims[0].user_id}）`,
@@ -151,7 +158,7 @@ export class Store {
       '- **逐笔结果**：',...rows,
       `- **时间**：${new Date(Math.max(...claims.map(c=>c.updated_at))).toLocaleString('zh-CN',{timeZone:this.rules().timezone,hour12:false})}`
     ].join('\n');
-    this.notify('batch_result',JSON.stringify({title,text}),JSON.stringify([runId,owner,claims.map(c=>[c.id,c.status,c.amount,c.review_note,c.updated_at])]));
+    this.notify('batch_result',JSON.stringify({title,text}),JSON.stringify([runId,owner,claims.map(c=>[c.id,c.status,c.amount,c.review_note,c.updated_at]),hasAI]));
   }
   decode(row) { return row ? { ...row, log: JSON.parse(row.log), rules: JSON.parse(row.rules) } : null; }
   get(id) { return this.decode(this.db.prepare('SELECT * FROM claims WHERE id=?').get(id)); }
@@ -171,6 +178,10 @@ export class Store {
   aiReview(requestId, fingerprint, promptVersion) {
     const row = this.db.prepare('SELECT * FROM ai_reviews WHERE request_id=? AND log_fingerprint=? AND prompt_version=?').get(requestId, fingerprint, promptVersion);
     return row ? { ...row, evidence: JSON.parse(row.evidence) } : null;
+  }
+  latestAIReview(requestId, fingerprint) {
+    const row=this.db.prepare('SELECT * FROM ai_reviews WHERE request_id=? AND log_fingerprint=? ORDER BY created_at DESC,rowid DESC LIMIT 1').get(requestId,fingerprint);
+    return row?{...row,evidence:JSON.parse(row.evidence)}:null;
   }
   aiReviewCount(day, userId) {
     const start = Date.parse(day + 'T00:00:00.000Z'), end = start + 86400000;

@@ -24,8 +24,12 @@ export class Compensation {
     return c;
   }
   view(c, admin = false) {
-    const aiReview = this.store.aiReview(c.request_id, logFingerprint(c.log), this.ai.promptVersion?.() || 'empty-v1');
-    if (admin) return {...c,fundingSource:fundingSource(c.log),compensationLabel:compensationLabel(c.log,c.source),expectedAmount:expectedQuota(c.log,c.rules),aiReview};
+    if (admin) {
+      const fingerprint=logFingerprint(c.log),version=this.ai.promptVersion?.()||'empty-v1';
+      const current=this.store.aiReview(c.request_id,fingerprint,version);
+      const aiReview=current||this.store.latestAIReview(c.request_id,fingerprint);
+      return {...c,fundingSource:fundingSource(c.log),compensationLabel:compensationLabel(c.log,c.source),expectedAmount:expectedQuota(c.log,c.rules),aiReview,aiReviewIsCurrent:Boolean(current)};
+    }
     const { rules, log, operator_id, attempt_id, verification_note, confirmed_unreturned, ...safe } = c;
     return { ...safe, log: publicLog(log), fundingSource:fundingSource(log),compensationLabel:compensationLabel(log,c.source),ruleVersion: rules.version,expectedAmount:expectedQuota(log,rules) };
   }
@@ -88,6 +92,17 @@ export class Compensation {
     if (!['approve', 'reject'].includes(action)) throw new AppError('审核动作无效');
     if(action==='approve'&&fundingSource(claim.log)==='subscription')throw new AppError('订阅转余额审批须确认核实金额并执行返还');
     return this.store.transition(id, ['pending'], action === 'approve' ? 'approved' : 'rejected', user.id, note);
+  }
+  async assistReview(user,id){
+    this.requireAdmin(user);
+    const claim=this.claimFor(user,id),rules=this.store.rules();
+    if(!rules.aiEnabled)throw new AppError('AI 辅助审核已关闭，请先在 AI 设置中开启',409);
+    if(!['pending','approved'].includes(claim.status))throw new AppError('当前申请状态不支持 AI 辅助审核',409);
+    if(!this.ai.configured())throw new AppError('请先保存 AI API 地址、密钥和模型',400);
+    const result=await this.ai.review(claim.log,rules);
+    const recorded=this.store.db.prepare("SELECT 1 FROM events WHERE claim_id=? AND action='admin_ai_reviewed' AND json_extract(detail,'$.reviewId')=?").get(id,result.id);
+    if(!recorded)this.store.event(id,user.id,'admin_ai_reviewed',{reviewId:result.id,decision:result.decision,confidence:result.confidence,promptVersion:result.prompt_version,status:result.status});
+    return this.view(this.store.get(id),true);
   }
   async approveSubscription(user,id,verifiedAmount,note){
     this.requireAdmin(user);const claim=this.claimFor(user,id);

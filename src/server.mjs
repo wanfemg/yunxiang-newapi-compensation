@@ -13,6 +13,8 @@ import {parseQuota} from '../public/display.js';
 import { Branding } from './branding.mjs';
 import { StorageMaintenance } from './storage.mjs';
 import { EmailNotifications } from './email-notifications.mjs';
+import { normalizeAIBaseURL } from './ai-review.mjs';
+import {notificationMarkdown} from './notification-titles.mjs';
 
 const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
 const assetNames = ['app.js','style.css','glass.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','ui-version.js'];
@@ -154,7 +156,8 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       if(path==='/api/admin/groups'&&req.method==='GET')return send(await upstream.groups());
       if(path==='/api/admin/ai-config'&&req.method==='GET'){
         const c=store.aiConfig();
-        return send({baseUrl:c.baseUrl,model:c.model,prompt:c.prompt,timeoutMs:c.timeoutMs,configured:Boolean(c.baseUrl&&c.apiKey&&c.model),apiKeyConfigured:Boolean(c.apiKey),apiKeyMasked:c.apiKey?`${c.apiKey.slice(0,4)}••••${c.apiKey.slice(-4)}`:''});
+        const r=store.rules();
+        return send({baseUrl:c.baseUrl,model:c.model,prompt:c.prompt,timeoutMs:c.timeoutMs,configured:Boolean(c.baseUrl&&c.apiKey&&c.model),apiKeyConfigured:Boolean(c.apiKey),apiKeyMasked:c.apiKey?`${c.apiKey.slice(0,4)}••••${c.apiKey.slice(-4)}`:'',aiEnabled:r.aiEnabled,aiAutoThreshold:r.aiAutoThreshold,aiDailyLimit:r.aiDailyLimit,rulesVersion:r.version});
       }
       if(path==='/api/admin/ai-config'&&req.method==='PUT'){
         const b=await readBody(req),baseUrl=String(b.baseUrl||'').trim().replace(/\/+$/,''),model=String(b.model||'').trim(),prompt=String(b.prompt||'').trim(),timeoutMs=Number(b.timeoutMs||15000);
@@ -164,11 +167,20 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         if(model.length>200)throw new AppError('AI 模型名称不得超过 200 字');
         if(prompt.length>12000)throw new AppError('AI 判定提示词不得超过 12000 字');
         if(!Number.isSafeInteger(timeoutMs)||timeoutMs<3000||timeoutMs>120000)throw new AppError('AI 超时时间须为 3000–120000 毫秒');
-        const saved=store.saveAIConfig({baseUrl,model,prompt,timeoutMs,apiKey:b.apiKey},user.id);
-        return send({baseUrl:saved.baseUrl,model:saved.model,prompt:saved.prompt,timeoutMs:saved.timeoutMs,configured:Boolean(saved.baseUrl&&saved.apiKey&&saved.model),apiKeyConfigured:Boolean(saved.apiKey),apiKeyMasked:saved.apiKey?`${saved.apiKey.slice(0,4)}••••${saved.apiKey.slice(-4)}`:''});
+        const aiRules=Object.fromEntries(['aiEnabled','aiAutoThreshold','aiDailyLimit','rulesVersion'].filter(key=>Object.hasOwn(b,key)).map(key=>[key,b[key]]));
+        const saved=store.saveAIConfig({baseUrl:normalizeAIBaseURL(baseUrl),model,prompt,timeoutMs,apiKey:b.apiKey,...aiRules},user.id),r=store.rules();
+        return send({baseUrl:saved.baseUrl,model:saved.model,prompt:saved.prompt,timeoutMs:saved.timeoutMs,configured:Boolean(saved.baseUrl&&saved.apiKey&&saved.model),apiKeyConfigured:Boolean(saved.apiKey),apiKeyMasked:saved.apiKey?`${saved.apiKey.slice(0,4)}••••${saved.apiKey.slice(-4)}`:'',aiEnabled:r.aiEnabled,aiAutoThreshold:r.aiAutoThreshold,aiDailyLimit:r.aiDailyLimit,rulesVersion:r.version});
       }
       if(path==='/api/admin/ai-config/models'&&req.method==='GET')return send({items:await service.ai.models()});
       if(path==='/api/admin/ai-config/test'&&req.method==='POST')return send(await service.ai.test());
+      if(path==='/api/admin/ai-settings'&&req.method==='PUT'){
+        const b=await readBody(req);
+        const input=Object.fromEntries(['aiEnabled','aiAutoThreshold','aiDailyLimit','rulesVersion'].filter(key=>Object.hasOwn(b,key)).map(key=>[key,b[key]]));
+        if(!['aiEnabled','aiAutoThreshold','aiDailyLimit'].some(key=>Object.hasOwn(input,key)))throw new AppError('未提交 AI 审核设置');
+        store.saveAIConfig(input,user.id);
+        const r=store.rules();
+        return send({aiEnabled:r.aiEnabled,aiAutoThreshold:r.aiAutoThreshold,aiDailyLimit:r.aiDailyLimit,rulesVersion:r.version});
+      }
       if(path==='/api/admin/storage'&&req.method==='GET')return send(storage.info());
       if(path==='/api/admin/storage/preview'&&req.method==='POST')return send(storage.preview(user.id,await readBody(req)));
       if(path==='/api/admin/storage/cleanup'&&req.method==='POST'){
@@ -203,6 +215,8 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         await queueEmails(result.filter(v=>v.success).map(v=>store.byRequest(v.requestId)).filter(Boolean),user.id);
         return send(result);
       }
+      const assist=base.match(/^\/api\/claims\/([a-f0-9-]{36})\/ai-review$/);
+      if(admin&&assist&&req.method==='POST')return send(await service.assistReview(user,assist[1]));
       const detail = base.match(/^\/api\/claims\/([a-f0-9-]{36})$/);
       if (detail && req.method === 'GET') {
         const c = service.claimFor(user, detail[1]);
@@ -264,7 +278,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       }
       if (admin && base === '/api/stats' && req.method === 'GET') return send(store.adminStatistics(url.searchParams.get('kind') || 'users',pageValue(url.searchParams.get('page'))));
       if (admin && base === '/api/audit' && req.method === 'GET') return send(store.db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT 100').all());
-      if (admin && base === '/api/notifications' && req.method === 'GET') return send({ config: dingTalk?.status() || { configured: false }, items: store.db.prepare('SELECT id,event,status,attempts,result,created_at FROM notifications ORDER BY id DESC LIMIT 100').all() });
+      if (admin && base === '/api/notifications' && req.method === 'GET') return send({ config: dingTalk?.status() || { configured: false }, items: store.db.prepare('SELECT id,event,body,status,attempts,result,created_at FROM notifications ORDER BY id DESC LIMIT 100').all().map(({body,...row})=>({...row,title:notificationMarkdown({...row,body}).title})) });
       if (admin && base === '/api/notifications' && req.method === 'PUT') {
         if (!dingTalk) throw new AppError('通知存储不可用', 503);
         const result = dingTalk.save(await readBody(req)); store.event(null, user.id, 'notification_config_updated', result); return send(result);

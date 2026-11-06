@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { Store } from '../src/store.mjs';
 import { createApplication } from '../src/server.mjs';
 import { mockServer, rules, user, admin, log } from './helpers.mjs';
@@ -24,6 +25,59 @@ test('保持登录使用 30 天会话，普通登录保持默认时长',async t=
  const remembered=await f.request('/api/auth/login',{method:'POST',body:{username:user.username,password:'fixture-password',remember:true}});
  assert.match(normal.cookie,/Max-Age=28800/);
  assert.match(remembered.cookie,/Max-Age=2592000/);
+});
+
+test('AI 配置经真实 HTTP 拉取模型并验证所选模型推理，空回复和鉴权错误均不成功',async t=>{
+  const f=await setup(t),a=await f.login(admin),u=await f.login(user),calls=[];
+  let mode='ok';
+  const ai=createServer(async(req,res)=>{
+    let text='';for await(const chunk of req)text+=chunk;
+    calls.push({path:req.url,auth:req.headers.authorization,body:text?JSON.parse(text):null,method:req.method});
+    res.setHeader('Content-Type','application/json');
+    if(mode==='unauthorized'){res.statusCode=401;res.end(JSON.stringify({error:{message:'invalid fixture-ai-key'}}));return;}
+    if(req.url==='/v1/models'){res.end(JSON.stringify({success:true,object:'list',data:[{id:'chat-model'}]}));return;}
+    if(req.url==='/v1/chat/completions'){const body=JSON.parse(text);res.end(JSON.stringify({choices:[{message:{content:mode==='empty'?'':body.messages[0].role==='system'?'{"decision":"uncertain","confidence":0.5,"reason":"需要人工核验","evidence":["缺少原始输出"]}':'OK'}}]}));return;}
+    res.statusCode=404;res.end('{}');
+  });
+  ai.listen(0,'127.0.0.1');await once(ai,'listening');
+  t.after(async()=>{ai.closeAllConnections();await new Promise(resolve=>ai.close(resolve));});
+  const baseUrl='http://127.0.0.1:'+ai.address().port;
+  const save=body=>f.request('/api/admin/ai-config',{...a,method:'PUT',body});
+  assert.equal((await f.request('/api/admin/ai-config/models',u)).status,403);
+  assert.equal((await save({baseUrl,apiKey:'fixture-ai-key',model:''})).json.data.baseUrl,baseUrl+'/v1');
+  const models=await f.request('/api/admin/ai-config/models',a);
+  assert.deepEqual(models.json.data.items,[{id:'chat-model',name:'chat-model'}]);
+  assert.equal((await f.request('/api/admin/ai-config/test',{...a,method:'POST',body:{}})).status,400);
+  assert.equal(calls.length,1);
+  const saved=await save({baseUrl:baseUrl+'/v1/',model:'chat-model',apiKey:''});
+  assert.ok(!JSON.stringify(saved).includes('fixture-ai-key'));
+  const tested=await f.request('/api/admin/ai-config/test',{...a,method:'POST',body:{}});
+  assert.equal(tested.status,200);assert.equal(tested.json.data.reply,'OK');assert.equal(tested.json.data.model,'chat-model');
+  assert.equal(calls[1].path,'/v1/chat/completions');assert.equal(calls[1].method,'POST');
+  assert.equal(calls[1].body.model,'chat-model');assert.equal(calls[1].auth,'Bearer fixture-ai-key');
+  mode='empty';assert.equal((await f.request('/api/admin/ai-config/test',{...a,method:'POST',body:{}})).status,502);
+  mode='unauthorized';
+  const rejected=await f.request('/api/admin/ai-config/models',a);
+  assert.equal(rejected.status,502);assert.match(rejected.json.message,/401/);assert.ok(!JSON.stringify(rejected.json).includes('fixture-ai-key'));
+  mode='ok';
+  const version=f.store.rules().version;
+  assert.equal((await save({baseUrl,model:'chat-model',aiEnabled:true,aiAutoThreshold:94,aiDailyLimit:15,rulesVersion:version})).status,200);
+  assert.equal((await f.request('/api/rules',a)).json.data.aiEnabled,true);
+  assert.equal((await f.request('/api/admin/ai-config',a)).json.data.aiAutoThreshold,94);
+  assert.equal((await save({baseUrl,model:'wrong',aiEnabled:false,rulesVersion:version})).status,409);
+  assert.equal(f.store.aiConfig().model,'chat-model');
+  const c=f.store.create(log(),user,f.store.rules(),'管理员辅助审核','self',7);
+  assert.equal((await f.request('/api/admin/claims/'+c.id+'/ai-review',{...u,method:'POST',body:{}})).status,403);
+  const before=calls.length;
+  const assisted=await f.request('/api/admin/claims/'+c.id+'/ai-review',{...a,method:'POST',body:{}});
+  assert.equal(assisted.status,200);assert.equal(assisted.json.data.aiReview.reason,'需要人工核验');
+  assert.equal(assisted.json.data.status,'pending');assert.equal(f.remote.data.credits.length,0);
+  await f.request('/api/admin/claims/'+c.id+'/ai-review',{...a,method:'POST',body:{}});
+  assert.equal(calls.length,before+1);
+  assert.equal((await f.request('/api/admin/ai-settings',{...u,method:'PUT',body:{aiEnabled:false,rulesVersion:f.store.rules().version}})).status,403);
+  assert.equal((await f.request('/api/admin/ai-settings',{...a,method:'PUT',body:{aiEnabled:false,rulesVersion:f.store.rules().version}})).status,200);
+  assert.equal((await f.request('/api/admin/ai-config',a)).json.data.aiEnabled,false);
+  assert.equal((await f.request('/api/admin/claims/'+c.id+'/ai-review',{...a,method:'POST',body:{}})).status,409);
 });
 
 test('HTTP 渠道模型排除由站长保存，查询展示跳过摘要且伪造申请不能绕过',async t=>{
