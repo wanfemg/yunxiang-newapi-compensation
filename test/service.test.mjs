@@ -16,6 +16,18 @@ test('申请→审核→返还→统计闭环，记录独立审计',async t=>{
 test('重复申请与重复执行都不重复到账',async t=>{
   const f=fixture();t.after(()=>f.store.close());const c=await approved(f);await assert.rejects(f.service.apply(user,c.request_id,'重复申请'),/已申请/);await f.service.execute(admin,c.id,120,'核验');await assert.rejects(f.service.execute(admin,c.id,120,'重复执行'),/仅已通过/);assert.equal(f.calls(),1);
 });
+test('同一提交批次的多模型申请只生成一条完整汇总通知',t=>{
+  const f=fixture({rules:{notifications:{enabled:true,events:['batch_result']}}});t.after(()=>f.store.close());
+  const runId='batch-fixture';
+  const first=f.store.create(log('batch-a'),user,f.store.rules(),'x','self',7,false,runId);
+  const second=f.store.create(log('batch-b',{model_name:'second-model',quota:80}),user,f.store.rules(),'x','self',7,false,runId);
+  f.store.notifyClaimsBatch(runId);
+  const notices=f.store.db.prepare('SELECT event,body FROM notifications').all();
+  assert.equal(notices.length,1);assert.equal(notices[0].event,'batch_result');
+  assert.match(notices[0].body,/fixture-model/);assert.match(notices[0].body,/second-model/);
+  assert.match(notices[0].body,/申请笔数 \/ 模型数/);
+  assert.equal(f.store.get(first.id).run_id,runId);assert.equal(f.store.get(second.id).run_id,runId);
+});
 test('普通用户不能审核执行或查看别人申请；返回日志不含渠道诊断',async t=>{
   const f=fixture();t.after(()=>f.store.close());const c=await f.service.apply(user,'fixture-request-1','核实');assert.throws(()=>f.service.review(user,c.id,'approve','x'),/权限/);await assert.rejects(f.service.execute(user,c.id,120,'x'),/权限/);assert.throws(()=>f.service.claimFor({...user,id:8},c.id),/不存在/);
   const view=f.service.view(f.store.get(c.id));assert.equal(view.log.channel,undefined);assert.equal(view.log.other,undefined);assert.equal(view.rules,undefined);
@@ -47,7 +59,7 @@ test('进程重启恢复执行中为待确认，不自动重放',()=>{
   try{st=new Store(path);const r=rules();const c=st.create(log(),user,r,'x','self',7);st.transition(c.id,['pending'],'approved',1,'x');st.reserve(c.id,1,120,120,'核验',r);st.close();st=new Store(path);assert.equal(st.get(c.id).status,'unknown');assert.equal(st.overview(7).today.quota,120);}finally{st?.close();rmSync(dir,{recursive:true,force:true});}
 });
 test('实例绑定阻止切换上游；有执行记录后禁止切换时区重置额度',async t=>{
- const f=fixture();t.after(()=>f.store.close());f.store.bindInstance('https://one.example');f.store.bindInstance('https://one.example/');assert.throws(()=>f.store.bindInstance('https://two.example'),/其他 NewAPI/);
+ const f=fixture();t.after(()=>f.store.close());f.store.bindInstance('https://one.example');f.store.bindInstance('https://one.example/');assert.throws(()=>f.store.bindInstance('https://two.example'),/其他 云中猫API小站/);
  const c=await approved(f);await f.service.execute(admin,c.id,120,'核验');assert.throws(()=>f.service.saveRules(admin,{...f.store.rules(),timezone:'UTC'}),/不允许切换/);
 });
 test('实际补回金额扣减每日限额，改重置时间重新归属历史且跨界恢复',t=>{

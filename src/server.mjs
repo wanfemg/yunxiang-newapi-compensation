@@ -12,8 +12,13 @@ import { managementToken } from './config.mjs';
 import {parseQuota} from '../public/display.js';
 import { Branding } from './branding.mjs';
 import { StorageMaintenance } from './storage.mjs';
+import { EmailNotifications } from './email-notifications.mjs';
 
 const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
+const assetNames = ['app.js','style.css','glass.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','ui-version.js'];
+const assetContents = new Map(['index.html',...assetNames].map(name=>[name,readFileSync(join(publicDirectory,name))]));
+const uiVersion = createHash('sha256').update([...assetContents.values()].join('\0')).digest('hex').slice(0,16);
+const staticFiles = new Set(['/', ...assetNames.map(name=>'/'+name)]);
 const digest = value => createHash('sha256').update(value).digest('hex');
 const cleanUser = u => ({ id: u.id, username: u.username, display_name: u.display_name, role: u.role });
 async function readBody(req) {
@@ -23,7 +28,7 @@ async function readBody(req) {
 }
 function pageValue(value) { const n = Number(value || 1); if (!Number.isSafeInteger(n) || n < 1 || n > 10000) throw new AppError('页码无效'); return n; }
 
-export function createApplication({ store, upstream, origin = 'http://127.0.0.1:3210', dingTalk = null }) {
+export function createApplication({ store, upstream, origin = 'http://127.0.0.1:3210', dingTalk = null, emailNotifications = null }) {
   const branding = new Branding(upstream);
   const storage = new StorageMaintenance(store);
   const service = new Compensation(store, upstream), sessions = new Map(), challenges = new Map(), rate = new Map();
@@ -32,6 +37,14 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
   const sessionHours = Number(process.env.SESSION_HOURS || 8);
   const normalSessionSeconds = Number.isSafeInteger(sessionHours) && sessionHours >= 1 && sessionHours <= 720 ? sessionHours * 3600 : 28800;
   const rememberSessionSeconds = Math.max(normalSessionSeconds, 30 * 24 * 3600);
+  async function queueEmails(claims,actor){
+    if(!emailNotifications)return;
+    try{
+      for(const event of ['approved','succeeded','failed','unknown'])await emailNotifications.notifyClaims(event,claims.filter(c=>c.status===event),upstream);
+    }catch{
+      try{store.event(null,actor,'email_notification_enqueue_failed',{claimIds:claims.map(c=>c.id)});}catch{console.error('Email notification enqueue failed');}
+    }
+  }
   function setSession(res, token, user, remember = false) {
     const raw = randomBytes(32).toString('base64url'), csrf = randomBytes(24).toString('base64url');
     const maxAge = remember ? rememberSessionSeconds : normalSessionSeconds;
@@ -64,13 +77,25 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         res.writeHead(308, { Location: expectedOrigin + path });
         res.end(); return;
       }
-      if (req.method === 'GET' && ['/','/app.js','/style.css','/glass.css','/icons.js','/display.js','/controls.js','/snapshot.js'].includes(path)) {
-        const file = path === '/' ? 'index.html' : path.slice(1);
+      const versionedAsset=path.match(/^\/assets\/([a-f0-9]{16})\/([a-z.-]+)$/);
+      if (versionedAsset && (versionedAsset[1]!==uiVersion || !assetNames.includes(versionedAsset[2]))) throw new AppError('界面资源已更新，请刷新页面',404);
+      if (req.method === 'GET' && (staticFiles.has(path)||versionedAsset)) {
+        const file = path === '/' ? 'index.html' : versionedAsset?versionedAsset[2]:path.slice(1);
         res.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript; charset=utf-8' : file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/html; charset=utf-8');
-        const content = readFileSync(join(publicDirectory, file));
-        res.end(file === 'index.html' ? content.toString('utf8').replace('<head>', '<head>\n  <meta name="application-origin" content="'+expectedOrigin+'">') : content); return;
+        const content = assetContents.get(file);
+        if(file==='index.html'){
+          const versioned=content.toString('utf8').replace('<head>', '<head>\n  <meta name="application-origin" content="'+expectedOrigin+'">\n  <meta name="ui-version" content="'+uiVersion+'">')
+            .replace(/(href|src)="\/(style\.css|glass\.css|icons\.js|app\.js)"/g,'$1="/assets/'+uiVersion+'/$2"');
+          res.setHeader('Cache-Control','no-store, no-cache, must-revalidate, max-age=0');
+          res.setHeader('ETag',`"${uiVersion}"`);res.end(versioned);
+        }else{
+          res.setHeader('Cache-Control',versionedAsset?'public, max-age=31536000, immutable':'no-store, no-cache, must-revalidate, max-age=0');res.setHeader('ETag',`"${uiVersion}-${file}"`);
+          res.end(content);
+        }
+        return;
       }
       if (path === '/api/health' && req.method === 'GET') return send({ status: 'ok', configured: Boolean(upstream.adminToken) });
+      if (path === '/api/ui-version' && req.method === 'GET') return send({ version:uiVersion });
       if (path === '/api/brand' && req.method === 'GET') {
         try { const brand = await branding.read(); return send({ name: brand.name, logo: brand.logo }); }
         catch { return send({ name: '云响', logo: '' }); }
@@ -112,7 +137,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       }
       const cookies = Object.fromEntries(String(req.headers.cookie || '').split(';').map(s => s.trim().split('=')));
       const key = digest(cookies[cookieName] || ''), session = sessions.get(key);
-      if (!session || session.expires < Date.now()) { sessions.delete(key); throw new AppError('请使用 NewAPI 账号登录', 401); }
+      if (!session || session.expires < Date.now()) { sessions.delete(key); throw new AppError('请使用 云中猫API小站 账号登录', 401); }
       if (mutating && req.headers['x-csrf-token'] !== session.csrf) throw new AppError('请求凭据校验失败', 403);
       // Every request revalidates original identity/role; never trust browser roles.
       let user; try { user = await upstream.identity(session.token, session.user.id); } catch (e) { sessions.delete(key); throw new AppError('原站登录已失效或暂不可用，请重新登录', 401); }
@@ -129,17 +154,18 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       if(path==='/api/admin/groups'&&req.method==='GET')return send(await upstream.groups());
       if(path==='/api/admin/ai-config'&&req.method==='GET'){
         const c=store.aiConfig();
-        return send({baseUrl:c.baseUrl,model:c.model,timeoutMs:c.timeoutMs,configured:Boolean(c.baseUrl&&c.apiKey&&c.model),apiKeyConfigured:Boolean(c.apiKey),apiKeyMasked:c.apiKey?`${c.apiKey.slice(0,4)}••••${c.apiKey.slice(-4)}`:''});
+        return send({baseUrl:c.baseUrl,model:c.model,prompt:c.prompt,timeoutMs:c.timeoutMs,configured:Boolean(c.baseUrl&&c.apiKey&&c.model),apiKeyConfigured:Boolean(c.apiKey),apiKeyMasked:c.apiKey?`${c.apiKey.slice(0,4)}••••${c.apiKey.slice(-4)}`:''});
       }
       if(path==='/api/admin/ai-config'&&req.method==='PUT'){
-        const b=await readBody(req),baseUrl=String(b.baseUrl||'').trim().replace(/\/+$/,''),model=String(b.model||'').trim(),timeoutMs=Number(b.timeoutMs||15000);
+        const b=await readBody(req),baseUrl=String(b.baseUrl||'').trim().replace(/\/+$/,''),model=String(b.model||'').trim(),prompt=String(b.prompt||'').trim(),timeoutMs=Number(b.timeoutMs||15000);
         let parsed;try{parsed=new URL(baseUrl);}catch{throw new AppError('AI API 地址格式无效');}
         if(!['http:','https:'].includes(parsed.protocol)||parsed.username||parsed.password||parsed.search||parsed.hash)throw new AppError('AI API 地址必须是无凭据的 HTTP(S) 根地址');
         if(!['127.0.0.1','localhost','[::1]'].includes(parsed.hostname)&&parsed.protocol!=='https:')throw new AppError('非本机 AI API 必须使用 HTTPS');
-        if(!model||model.length>200)throw new AppError('AI 模型名称不能为空且不得超过 200 字');
+        if(model.length>200)throw new AppError('AI 模型名称不得超过 200 字');
+        if(prompt.length>12000)throw new AppError('AI 判定提示词不得超过 12000 字');
         if(!Number.isSafeInteger(timeoutMs)||timeoutMs<3000||timeoutMs>120000)throw new AppError('AI 超时时间须为 3000–120000 毫秒');
-        const saved=store.saveAIConfig({baseUrl,model,timeoutMs,apiKey:b.apiKey},user.id);
-        return send({baseUrl:saved.baseUrl,model:saved.model,timeoutMs:saved.timeoutMs,configured:Boolean(saved.baseUrl&&saved.apiKey&&saved.model),apiKeyConfigured:Boolean(saved.apiKey),apiKeyMasked:saved.apiKey?`${saved.apiKey.slice(0,4)}••••${saved.apiKey.slice(-4)}`:''});
+        const saved=store.saveAIConfig({baseUrl,model,prompt,timeoutMs,apiKey:b.apiKey},user.id);
+        return send({baseUrl:saved.baseUrl,model:saved.model,prompt:saved.prompt,timeoutMs:saved.timeoutMs,configured:Boolean(saved.baseUrl&&saved.apiKey&&saved.model),apiKeyConfigured:Boolean(saved.apiKey),apiKeyMasked:saved.apiKey?`${saved.apiKey.slice(0,4)}••••${saved.apiKey.slice(-4)}`:''});
       }
       if(path==='/api/admin/ai-config/models'&&req.method==='GET')return send({items:await service.ai.models()});
       if(path==='/api/admin/ai-config/test'&&req.method==='POST')return send(await service.ai.test());
@@ -173,6 +199,8 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         if (!Array.isArray(b.requestIds) || !b.requestIds.length || b.requestIds.length > 30) throw new AppError('每批提交 1–30 条消费');
         const result = [],runId=randomUUID();
         for (const id of [...new Set(b.requestIds)]) { try { const claim=admin?await service.apply(user,id,b.reason,true,false,runId):await service.selfService(user,id,b.reason,runId);result.push({ requestId: id, success: true, status:claim.status, claim }); } catch (e) { result.push({ requestId: id, success: false, message: e instanceof AppError ? e.message : '处理失败' }); } }
+        store.notifyClaimsBatch(runId);
+        await queueEmails(result.filter(v=>v.success).map(v=>store.byRequest(v.requestId)).filter(Boolean),user.id);
         return send(result);
       }
       const detail = base.match(/^\/api\/claims\/([a-f0-9-]{36})$/);
@@ -190,6 +218,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
           if(b.displayRevision!==digest(JSON.stringify(display)))throw new AppError('原站额度显示设置已变化，请关闭窗口并重新核对金额',409);
           store.db.prepare("INSERT OR REPLACE INTO metadata(key,value) VALUES('display',?)").run(JSON.stringify(display));
         }
+        const runIds=new Set(b.items.map(item=>store.get(item.id)?.run_id).filter(Boolean));
         const result = [];
         for (const item of b.items) {
           try {
@@ -206,6 +235,8 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
             result.push({ id: item.id, success: true, status: c.status });
           } catch (e) { result.push({ id: item.id, success: false, message: e instanceof AppError ? e.message : '处理失败，请检查服务端记录' }); }
         }
+        for(const runId of runIds)store.notifyClaimsBatch(runId);
+        await queueEmails(result.filter(v=>v.success).map(v=>store.get(v.id)).filter(Boolean),user.id);
         return send(result);
       }
       if (base === '/api/rules' && req.method === 'GET') {
@@ -242,6 +273,17 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         if (!dingTalk?.status().configured || !store.rules().notifications.enabled) throw new AppError('先配置机器人并开启通知');
         store.notify('notification_test', '机器人连接测试'); return send({ queued: true });
       }
+      if (admin && base === '/api/email-notifications' && req.method === 'GET') {
+        return send({ config: emailNotifications?.status() || { configured:false, enabled:false }, items: store.db.prepare('SELECT id,event,status,attempts,result,recipient,created_at FROM email_notifications ORDER BY id DESC LIMIT 100').all().map(({recipient,...row})=>({...row,recipient:emailNotifications?.maskRecipient(recipient)||'未获取'})) });
+      }
+      if (admin && base === '/api/email-notifications' && req.method === 'PUT') {
+        if (!emailNotifications) throw new AppError('邮件通知存储不可用',503);
+        return send(emailNotifications.save(await readBody(req),user.id));
+      }
+      if (admin && base === '/api/email-notifications/test' && req.method === 'POST') {
+        if (!emailNotifications) throw new AppError('邮件通知存储不可用',503);
+        return send(await emailNotifications.test(String((await readBody(req)).to||'')));
+      }
       throw new AppError('接口不存在', 404);
     } catch (e) {
       res.statusCode = e instanceof AppError ? e.status : 500;
@@ -256,6 +298,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
     for (const [key, value] of challenges) if (value.expires < now) challenges.delete(key);
     for (const [key, value] of rate) if (value.until < now) rate.delete(key);
     dingTalk?.flush().catch(() => console.error('Notification worker failed'));
+    emailNotifications?.flush().catch(() => console.error('Email notification worker failed'));
   }, 15000);
   timer.unref(); server.on('close', () => clearInterval(timer));
   return { server, service };
@@ -271,7 +314,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const origin = process.env.PUBLIC_ORIGIN || `http://127.0.0.1:${port}`;
   if (new URL(origin).protocol !== 'https:' && !['127.0.0.1', 'localhost', '[::1]'].includes(new URL(origin).hostname)) throw new Error('公网访问的 PUBLIC_ORIGIN 必须为 HTTPS');
   const dingTalk = new DingTalk(store, data);
-  const { server } = createApplication({ store, upstream, origin, dingTalk });
-  server.listen(port, host, () => console.log(`NewAPI 补空回已启动：${origin}（未配置上游时仅显示登录入口）`));
+  const emailNotifications = new EmailNotifications(store, data, {upstream});
+  const { server } = createApplication({ store, upstream, origin, dingTalk, emailNotifications });
+  server.listen(port, host, () => console.log(`云中猫API小站 补空回已启动：${origin}（未配置上游时仅显示登录入口）`));
   for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => server.close(() => { store.close(); process.exit(0); }));
 }

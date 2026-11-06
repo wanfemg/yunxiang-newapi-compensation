@@ -24,7 +24,7 @@ try{
   assert.equal(fixture.store.rules().applicationHours,168);assert.deepEqual(fixture.store.rules().userGroups,['default']);
   await page.screenshot({path:'test-results/admin-new-settings.png',fullPage:true});
   await page.setViewportSize({width:390,height:844});await nav('申请处理中心');await page.locator('.status-sections').waitFor();await page.locator('#content [data-owner="7"]').waitFor();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:'test-results/admin-new-mobile.png',fullPage:true});await page.locator('#content [data-owner="7"]').click();await page.locator('.claim-model').first().waitFor();assert.equal(await page.locator('#detail-dialog').evaluate(el=>el.scrollWidth>el.clientWidth),false);await page.screenshot({path:'test-results/admin-group-mobile.png'});await page.locator('#close-dialog').click();
-  await nav('钉钉通知');await page.locator('#notification-form').waitFor();
+  await nav('通知中心');await page.locator('#notification-form').waitFor();
   // Displayed 1.2 units must credit exactly 120 internal quota, never 1.2 raw quota.
   await page.setViewportSize({width:1440,height:1000});await nav('申请处理中心');await page.locator('[data-queue-status=pending]').click();await page.locator('#content [data-owner="7"]').click();
   const subscriptionId=fixture.store.byRequest('demo-subscription-review').id;

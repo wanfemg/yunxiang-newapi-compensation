@@ -1,4 +1,4 @@
-// Local mock upstream only; no real balances or external NewAPI requests.
+// Local mock upstream only; no real balances or external 云中猫API小站 requests.
 import {createRequire} from 'node:module';
 import {mkdirSync} from 'node:fs';
 import assert from 'node:assert/strict';

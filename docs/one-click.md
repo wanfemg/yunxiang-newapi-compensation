@@ -10,13 +10,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-comp
 
 已有完整源码直接运行 `bash install.sh`。首次安装默认目录 `/opt/yunxiang`；修改路径使用 `YUNXIANG_INSTALL_DIR`，仓库与分支使用 `YUNXIANG_REPO`、`YUNXIANG_REF`。只支持 Linux + Docker Engine + Compose v2，不自动安装或修改 Docker、原站、反向代理或 TLS 证书。
 
-首次运行会依次检测 Docker、Compose 与 NewAPI 容器，询问本机端口、访问域名、站长 ID 和管理令牌，再构建镜像、启动持久化服务并执行只读接入检查。成功后终端输出访问地址。管理令牌隐藏输入，不保存原站密码，不创建默认生产账号。Linux 需安装 `curl`、`tar`、`util-linux`（提供 `flock`）。
+首次运行会依次检测 Docker、Compose 与 云中猫API小站 容器，询问本机端口、访问域名、站长 ID 和管理令牌，再构建镜像、启动持久化服务并执行只读接入检查。成功后终端输出访问地址。管理令牌隐藏输入，不保存原站密码，不创建默认生产账号。Linux 需安装 `curl`、`tar`、`util-linux`（提供 `flock`）。
 
 查看参数：`bash install.sh --help`。固定版本时将命令 URL 中的 `main` 与 `YUNXIANG_REF` 同时改成同一标签或提交号；不要只修改其中一个。
 
 ## 无人值守部署
 
-先把 NewAPI 管理令牌保存到仅管理员可读的 `/root/newapi-admin-token`，再执行：
+先把 云中猫API小站 管理令牌保存到仅管理员可读的 `/root/newapi-admin-token`，再执行：
 
 ```bash
 export NEWAPI_URL=https://newapi.example.com
@@ -31,13 +31,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-comp
 
 ## 自动适配
 
-- 从运行中容器名称、镜像、启动命令识别 NewAPI；多个候选必须选择，不盲选。
+- 从运行中容器名称、镜像、启动命令识别 云中猫API小站；多个候选必须选择，不盲选。
 - Docker/Compose 自定义 bridge 网络：复用容器现有网络及内部 PORT，不挂载原站数据库。
 - Docker host 网络：云响也使用 host 网络，原站连接宿主机回环地址。
-- 未发现容器：输入主机服务或远程 NewAPI 根地址；云响以 host 网络容器运行。用 `NEWAPI_URL` 显式指定地址可跳过容器猜测；`NEWAPI_CONTAINER` 可指定容器。
+- 未发现容器：输入主机服务或远程 云中猫API小站 根地址；云响以 host 网络容器运行。用 `NEWAPI_URL` 显式指定地址可跳过容器猜测；`NEWAPI_CONTAINER` 可指定容器。
 - 只连接默认 bridge 的原站，自动读取发布到 `127.0.0.1` 或 `0.0.0.0` 的对应 TCP 端口，以 host 模式连接；未发布对应端口时要求使用 `NEWAPI_URL`，不会擅自修改原站网络。
 - 首次输入云响端口、HTTPS Origin、站长 ID 和管理令牌。令牌隐藏输入，不能自动猜取。端口默认仅本机监听，域名仍需代理到本地端口。
-- 数据库类型仅识别，识别文件不保存 DSN 密码。主机服务模式不声称识别了其数据库。日志与补款始终走 NewAPI API。
+- 数据库类型仅识别，识别文件不保存 DSN 密码。主机服务模式不声称识别了其数据库。日志与补款始终走 云中猫API小站 API。
 
 自动安装使用 `.env.auto`、`compose.generated.json`，不自动覆盖旧 `.env.docker` 配置。已有手动部署应先停止旧云响再切换入口并核对 NEWAPI_URL；命名卷同为 `newapi-compensation_compensation_data`，严禁双开或 `down -v`。远程接口 URL 不同也会触发账本实例绑定校验。
 
@@ -58,7 +58,7 @@ bash status.sh
 
 ## 持久化与备份
 
-生产启动自动创建 `/app/data/compensation.sqlite`，WAL 模式。包含规则、原消费与申请快照、唯一请求索引、发放账本、查询缓存、审计事件及通知队列。不是 NewAPI 原数据库，也不是临时日志文件。设置页显示持久化状态；演示预览使用内存且明确标记。
+生产启动自动创建 `/app/data/compensation.sqlite`，WAL 模式。包含规则、原消费与申请快照、唯一请求索引、发放账本、查询缓存、审计事件及通知队列。不是 云中猫API小站 原数据库，也不是临时日志文件。设置页显示持久化状态；演示预览使用内存且明确标记。
 
 ```bash
 cd /opt/yunxiang
@@ -74,4 +74,4 @@ docker compose --env-file .env.auto -f compose.generated.json logs --tail 100 co
 
 仅使用本地已下载的源码时，`bash install.sh` 会重新构建当前源码；需要获取仓库新版本时重新运行上方下载式命令。部署通过文件锁禁止并发操作。构建或接入检查失败会保留持久数据，终端不会输出部署成功。
 
-Logo 从 NewAPI `/api/status` 的 `logo` 读取，站内路径由后端同源代理；外部 HTTPS Logo 由浏览器无 referrer 加载。缺失或加载失败保留默认云朵图标。
+Logo 从 云中猫API小站 `/api/status` 的 `logo` 读取，站内路径由后端同源代理；外部 HTTPS Logo 由浏览器无 referrer 加载。缺失或加载失败保留默认云朵图标。

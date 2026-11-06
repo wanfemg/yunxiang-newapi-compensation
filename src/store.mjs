@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { defaults, AppError, settlementClock, expectedQuota, fundingSource, compensationLabel } from './rules.mjs';
 import {formatQuota} from '../public/display.js';
 
@@ -14,6 +14,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS claims_day ON claims(execution_day,status);
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, claim_id TEXT, actor_id INTEGER NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY, event TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, result TEXT, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS email_notifications (id INTEGER PRIMARY KEY, event TEXT NOT NULL, recipient TEXT, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, result TEXT, dedupe_key TEXT UNIQUE, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS log_query_cache (cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS ai_reviews (
         id TEXT PRIMARY KEY, request_id TEXT NOT NULL, user_id INTEGER NOT NULL,
@@ -31,6 +32,10 @@ export class Store {
         UPDATE claims SET reserved_at=COALESCE((SELECT MAX(created_at) FROM events WHERE claim_id=claims.id AND action='execution_reserved'),updated_at) WHERE execution_day IS NOT NULL`);
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS claims_run ON claims(user_id,run_id)');
+    if (!this.db.prepare('PRAGMA table_info(notifications)').all().some(c => c.name === 'dedupe_key')) {
+      this.db.exec('ALTER TABLE notifications ADD COLUMN dedupe_key TEXT');
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS notifications_dedupe ON notifications(dedupe_key,status,created_at)');
     this.db.exec('PRAGMA user_version=3');
     this.db.prepare('INSERT OR IGNORE INTO settings VALUES(1,?)').run(JSON.stringify(defaults));
     // A process may have died after the remote transfer: never replay it.
@@ -49,14 +54,18 @@ export class Store {
   bindInstance(url) {
     const normalized = new URL(url).origin;
     const existing = this.db.prepare("SELECT value FROM metadata WHERE key='newapi_origin'").get();
-    if (existing && existing.value !== normalized) throw new AppError('数据目录已绑定其他 NewAPI 实例，请使用独立数据目录', 409);
+    if (existing && existing.value !== normalized) throw new AppError('数据目录已绑定其他 云中猫API小站 实例，请使用独立数据目录', 409);
     this.db.prepare("INSERT OR IGNORE INTO metadata VALUES('newapi_origin',?)").run(normalized);
   }
   transaction(fn) {
     this.db.exec('BEGIN IMMEDIATE');
     try { const value = fn(); this.db.exec('COMMIT'); return value; } catch (e) { this.db.exec('ROLLBACK'); throw e; }
   }
-  rules() { return {...structuredClone(defaults), ...JSON.parse(this.db.prepare('SELECT value FROM settings WHERE id=1').get().value)}; }
+  rules() {
+    const saved=JSON.parse(this.db.prepare('SELECT value FROM settings WHERE id=1').get().value);
+    const result={...structuredClone(defaults),...saved,notifications:{...defaults.notifications,...saved.notifications},emailNotifications:{...defaults.emailNotifications,...saved.emailNotifications}};
+    return result;
+  }
   aiConfig() {
     const row = this.db.prepare("SELECT value FROM metadata WHERE key='ai_config'").get();
     let saved = {};
@@ -65,7 +74,8 @@ export class Store {
       baseUrl: String(saved.baseUrl || process.env.AI_BASE_URL || '').trim(),
       apiKey: String(saved.apiKey || process.env.AI_API_KEY || ''),
       model: String(saved.model || process.env.AI_MODEL || '').trim(),
-      timeoutMs: Number(saved.timeoutMs || process.env.AI_TIMEOUT_MS || 15000)
+      timeoutMs: Number(saved.timeoutMs || process.env.AI_TIMEOUT_MS || 15000),
+      prompt: String(saved.prompt || process.env.AI_PROMPT || '').trim()
     };
   }
   saveAIConfig(input, actor) {
@@ -75,7 +85,8 @@ export class Store {
         baseUrl: String(input.baseUrl ?? current.baseUrl).trim().replace(/\/+$/, ''),
         apiKey: input.apiKey === undefined || input.apiKey === '' ? current.apiKey : String(input.apiKey),
         model: String(input.model ?? current.model).trim(),
-        timeoutMs: Number(input.timeoutMs ?? current.timeoutMs)
+        timeoutMs: Number(input.timeoutMs ?? current.timeoutMs),
+        prompt: String(input.prompt ?? current.prompt).trim()
       };
       this.db.prepare("INSERT OR REPLACE INTO metadata(key,value) VALUES('ai_config',?)").run(JSON.stringify(next));
       this.event(null, actor, 'ai_config_updated', { baseUrl: next.baseUrl, model: next.model, timeoutMs: next.timeoutMs, apiKeyChanged: next.apiKey !== current.apiKey });
@@ -102,12 +113,16 @@ export class Store {
   event(claimId, actor, action, detail = {}) {
     this.db.prepare('INSERT INTO events(claim_id,actor_id,action,detail,created_at) VALUES(?,?,?,?,?)').run(claimId, actor, action, JSON.stringify(detail), Date.now());
   }
-  notify(event, body) {
+  notify(event, body, identity = null) {
     const n = this.rules().notifications;
     if (!n.enabled || (event !== 'notification_test' && !n.events.includes(event))) return;
-    this.db.prepare('INSERT INTO notifications(event,body,next_at,created_at) VALUES(?,?,?,?)').run(event, body, Date.now(), Date.now());
+    const now = Date.now(), dedupeKey = `${event}:${createHash('sha256').update(String(identity||body)).digest('hex')}`;
+    const existing = this.db.prepare("SELECT id FROM notifications WHERE dedupe_key=? AND status IN ('pending','sending','sent') AND created_at>? LIMIT 1").get(dedupeKey, identity?0:now - 120000);
+    if (existing) return existing.id;
+    return this.db.prepare('INSERT INTO notifications(event,body,next_at,created_at,dedupe_key) VALUES(?,?,?,?,?)').run(event, body, now, now, dedupeKey).lastInsertRowid;
   }
   notifyClaim(event,claim,note){
+    if(claim.run_id)return;
     const titles={application_pending:'空回补额度待审核',review_result:'空回补额度审核结果',compensation_success:'空回补额度成功',execution_failed:'空回补额度失败',execution_unknown:'空回补额度待对账',ai_reviewing:'AI 空回审查开始',ai_reviewed:'AI 空回审查结果',ai_auto_compensation:'AI 审查通过 · 自动补额度',ai_manual_review:'AI 审查不确定 · 转人工审核'};
     const safe=value=>String(value??'').replace(/[\\`*_{}\[\]()<>#!|@]/g,' ').replace(/[\r\n]+/g,' ').slice(0,500);
     let display;try{display=JSON.parse(this.db.prepare("SELECT value FROM metadata WHERE key='display'").get()?.value);}catch{}
@@ -118,6 +133,25 @@ export class Store {
       ['申请号',claim.id],['用户',claim.username+'（ID '+claim.user_id+'）'],['类型',compensationLabel(claim.log,claim.source)],['模型',claim.log.model_name],['原请求',claim.request_id],['补回额度',display?formatQuota(amount,display):'站点显示配置待同步'],['状态',label],['处理说明',note],['时间',new Date().toLocaleString('zh-CN',{timeZone:this.rules().timezone,hour12:false})]
     ].map(([key,value])=>'- **'+key+'**：'+safe(value)).join('\n');
     this.notify(event,JSON.stringify({title,text}));
+  }
+  notifyClaimsBatch(runId,owner=null){
+    if(owner===null){for(const row of this.db.prepare('SELECT DISTINCT user_id FROM claims WHERE run_id=?').all(runId))this.notifyClaimsBatch(runId,row.user_id);return;}
+    const claims=this.db.prepare('SELECT * FROM claims WHERE run_id=? AND user_id=? ORDER BY created_at,id').all(runId,owner).map(row=>this.decode(row));
+    if(!claims.length)return;
+    const safe=value=>String(value??'').replace(/[\\`*_{}\[\]()<>#!|@]/g,' ').replace(/[\r\n]+/g,' ').slice(0,300);
+    const labels={pending:'待人工审核',approved:'已通过 · 待执行',executing:'执行中',succeeded:'已补回',failed:'返还失败',unknown:'待人工对账',rejected:'已驳回'};
+    let display;try{display=JSON.parse(this.db.prepare("SELECT value FROM metadata WHERE key='display'").get()?.value);}catch{}
+    const succeeded=claims.filter(c=>c.status==='succeeded'),total=succeeded.reduce((sum,c)=>sum+c.amount,0);
+    const title=claims.length>1?`空回补偿批次处理结果（${claims.length} 笔）`:'空回补偿处理结果';
+    const rows=claims.map(c=>`- **${safe(c.log.model_name)}** · ${safe(c.request_id)} · ${labels[c.status]||safe(c.status)} · ${display?formatQuota(c.status==='succeeded'?c.amount:expectedQuota(c.log,c.rules),display):c.status==='succeeded'?c.amount:expectedQuota(c.log,c.rules)}${c.review_note?' · '+safe(c.review_note):''}`);
+    const text='### '+title+'\n'+[
+      `- **用户**：${safe(claims[0].username)}（ID ${claims[0].user_id}）`,
+      `- **申请笔数 / 模型数**：${claims.length} / ${new Set(claims.map(c=>c.log.model_name)).size}`,
+      `- **已确认补回**：${succeeded.length} 笔 · ${display?formatQuota(total,display):total}`,
+      '- **逐笔结果**：',...rows,
+      `- **时间**：${new Date(Math.max(...claims.map(c=>c.updated_at))).toLocaleString('zh-CN',{timeZone:this.rules().timezone,hour12:false})}`
+    ].join('\n');
+    this.notify('batch_result',JSON.stringify({title,text}),JSON.stringify([runId,owner,claims.map(c=>[c.id,c.status,c.amount,c.review_note,c.updated_at])]));
   }
   decode(row) { return row ? { ...row, log: JSON.parse(row.log), rules: JSON.parse(row.rules) } : null; }
   get(id) { return this.decode(this.db.prepare('SELECT * FROM claims WHERE id=?').get(id)); }
@@ -216,7 +250,8 @@ export class Store {
       if (!c || !from.includes(c.status)) throw new AppError('当前状态不允许此操作', 409);
       this.db.prepare('UPDATE claims SET status=?,operator_id=?,review_note=?,updated_at=? WHERE id=?').run(to, actor, note, Date.now(), id);
       this.event(id, actor, to, { note, previousStatus: c.status });
-      this.notifyClaim(to === 'pending' ? 'application_pending' : to === 'succeeded' ? 'compensation_success' : to === 'unknown' ? 'execution_unknown' : to === 'failed' ? 'execution_failed' : 'review_result',this.get(id),note);
+      const updated=this.get(id);
+      if(!updated.run_id)this.notifyClaim(to === 'pending' ? 'application_pending' : to === 'succeeded' ? 'compensation_success' : to === 'unknown' ? 'execution_unknown' : to === 'failed' ? 'execution_failed' : 'review_result',updated,note);
       return this.get(id);
     });
   }
@@ -235,7 +270,7 @@ export class Store {
     const rows = this.db.prepare("SELECT execution_day AS day, SUM(amount) AS quota, COUNT(*) AS count FROM claims WHERE user_id=? AND status='succeeded' AND execution_day BETWEEN ? AND ? GROUP BY execution_day").all(userId, ...range);
     const byDay = new Map(rows.map(row => [row.day, row]));
     for (const point of trend) Object.assign(point, byDay.get(point.day));
-    return {days, timezone, site: '当前 NewAPI 实例', updatedAt: now, quota: rows.reduce((sum, row) => sum + row.quota, 0), count: rows.reduce((sum, row) => sum + row.count, 0), trend};
+    return {days, timezone, site: '当前 云中猫API小站 实例', updatedAt: now, quota: rows.reduce((sum, row) => sum + row.quota, 0), count: rows.reduce((sum, row) => sum + row.count, 0), trend};
   }
   refundRecords(userId, page = 1) {
     const total=this.db.prepare("SELECT COUNT(DISTINCT COALESCE(run_id,id)) AS n FROM claims WHERE user_id=? AND status='succeeded'").get(userId).n;

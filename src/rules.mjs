@@ -8,9 +8,10 @@ export const defaults = {
   perRecordQuota: 0, userDailyQuota: 0, userDailyCount: 0, siteDailyQuota: 0, siteDailyCount: 0,
   maxPending: 10, applicationHours: 72, consumptionStart: null, consumptionEnd: null,
   openStart: '00:00', openEnd: '00:00', dailyResetTime: '00:00',
-  notifications: { enabled: false, events: ['application_pending', 'review_result', 'compensation_success', 'execution_failed', 'execution_unknown', 'ai_reviewing', 'ai_reviewed', 'ai_auto_compensation', 'ai_manual_review'] }
+  notifications: { enabled: false, events: ['application_pending', 'review_result', 'compensation_success', 'execution_failed', 'execution_unknown', 'ai_reviewing', 'ai_reviewed', 'ai_auto_compensation', 'ai_manual_review', 'batch_result'] },
+  emailNotifications: { enabled: false, events: ['approved', 'succeeded', 'failed', 'unknown'] }
 };
-export const eventTypes = ['application_pending', 'review_result', 'compensation_success', 'execution_failed', 'execution_unknown', 'ai_reviewing', 'ai_reviewed', 'ai_auto_compensation', 'ai_manual_review', 'notification_test'];
+export const eventTypes = ['application_pending', 'review_result', 'compensation_success', 'execution_failed', 'execution_unknown', 'ai_reviewing', 'ai_reviewed', 'ai_auto_compensation', 'ai_manual_review', 'batch_result', 'notification_test'];
 export function positiveInt(value, label = '数值') {
   if (!Number.isSafeInteger(value) || value <= 0) throw new AppError(`${label}必须是正整数`);
   return value;
@@ -18,6 +19,7 @@ export function positiveInt(value, label = '数值') {
 export function validateRules(input) {
   const r = structuredClone(input);
   r.dailyResetTime ??= defaults.dailyResetTime;
+  r.emailNotifications ??= structuredClone(defaults.emailNotifications);
   if (!Object.hasOwn(r, 'excludedModels')) r.excludedModels = [];
   for (const key of Object.keys(defaults)) if (!(key in r)) throw new AppError(`缺少规则：${key}`);
   for (const key of ['applicationsEnabled', 'executionEnabled', 'selfServiceEnabled','restrictModels']) if (typeof r[key] !== 'boolean') throw new AppError('开关必须为布尔值');
@@ -54,6 +56,7 @@ export function validateRules(input) {
   for (const k of ['consumptionStart', 'consumptionEnd']) if (r[k] !== null && (!Number.isSafeInteger(r[k]) || r[k] < 0)) throw new AppError('消费时间范围须为秒级时间戳或 null');
   if (r.consumptionStart !== null && r.consumptionEnd !== null && r.consumptionStart > r.consumptionEnd) throw new AppError('消费时间范围颠倒');
   if (!r.notifications || typeof r.notifications.enabled !== 'boolean' || !Array.isArray(r.notifications.events) || r.notifications.events.some(e => !eventTypes.includes(e))) throw new AppError('通知事件配置无效');
+  if(!r.emailNotifications||typeof r.emailNotifications.enabled!=='boolean'||!Array.isArray(r.emailNotifications.events)||r.emailNotifications.events.some(e=>!['approved','succeeded','failed','unknown'].includes(e)))throw new AppError('邮箱通知事件配置无效');
   if (r.applicationsEnabled || r.executionEnabled) {
     if (!r.channels.length || (r.restrictModels&&!r.models.length)) throw new AppError('开启前必须设置渠道及启用限制时的模型范围');
     for (const k of ['userDailyQuota', 'userDailyCount', 'siteDailyQuota', 'siteDailyCount']) positiveInt(r[k], '每日限额和次数');

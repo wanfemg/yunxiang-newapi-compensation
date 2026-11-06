@@ -10,7 +10,7 @@ try {
     try { metadata = JSON.parse(readFileSync(process.env.NEWAPI_DB_CONFIG_FILE, 'utf8')); }
     catch { throw new Error('数据库识别配置无法读取或格式无效'); }
     const host = new URL(process.env.NEWAPI_URL).hostname;
-    if (metadata.container && metadata.container !== host && !['127.0.0.1','localhost','[::1]'].includes(host)) throw new Error('数据库识别容器与 NewAPI 接口实例不一致');
+    if (metadata.container && metadata.container !== host && !['127.0.0.1','localhost','[::1]'].includes(host)) throw new Error('数据库识别容器与 云中猫API小站 接口实例不一致');
     console.log(metadata.mode==='api'?'主机或远程 API 接入；不读取原站数据库凭据。':databaseSummary(metadata));
   }
   const api = new NewAPI({ url: process.env.NEWAPI_URL, adminToken: managementToken(), adminUserId: process.env.NEWAPI_ADMIN_USER_ID, allowHttp: process.env.ALLOW_HTTP_UPSTREAM === '1' });

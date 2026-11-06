@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createHmac } from 'node:crypto';
 import { Store } from '../src/store.mjs';
 import { DingTalk } from '../src/notifications.mjs';
-import { rules } from './helpers.mjs';
+import { rules,log,user } from './helpers.mjs';
 test('钉钉配置加密存储不回显，官方域名验证、签名和队列发送',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'ding-test-')),store=new Store();let sent=0;
  try {
@@ -25,4 +25,16 @@ test('通知失败重试有上限；关闭事件后取消未发送队列',async(
   for(let i=0;i<5;i++){store.db.exec('UPDATE notifications SET next_at=0');await bot.flush();}assert.equal(store.db.prepare('SELECT status FROM notifications').get().status,'failed');assert.equal(store.db.prepare('SELECT attempts FROM notifications').get().attempts,5);
   store.notify('compensation_success','second');store.saveRules({...store.rules(),notifications:{enabled:true,events:[]}},1,store.rules().version);await bot.flush();assert.equal(store.db.prepare('SELECT status FROM notifications ORDER BY id DESC').get().status,'cancelled');
  }finally{store.close();rmSync(dir,{recursive:true,force:true});}
+});
+test('批量通知按用户隔离、重复汇总不重发，事件关闭后保持关闭',()=>{
+  const store=new Store();try{
+    store.saveRules(rules({notifications:{enabled:true,events:['batch_result']}}),1,1);
+    store.create(log('user7'),user,store.rules(),'审核','self',7,false,'shared-run');
+    store.create(log('user8',{user_id:8}),{...user,id:8,username:'other-user'},store.rules(),'审核','self',8,false,'shared-run');
+    store.notifyClaimsBatch('shared-run');store.notifyClaimsBatch('shared-run');
+    const rows=store.db.prepare('SELECT body FROM notifications ORDER BY id').all();assert.equal(rows.length,2);
+    assert.ok(!rows[0].body.includes('other-user'));assert.ok(!rows[1].body.includes(user.username));
+    store.saveRules({...store.rules(),notifications:{enabled:true,events:[]}},1,store.rules().version);
+    assert.deepEqual(store.rules().notifications.events,[]);store.notifyClaimsBatch('shared-run');assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM notifications').get().n,2);
+  }finally{store.close();}
 });

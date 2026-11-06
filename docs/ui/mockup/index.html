@@ -80,7 +80,7 @@
   <button data-s="login">登录</button>
 </div>
 <section id="refund" class="app">
-  <aside class="side"><div class="brand"><span class="logo">云</span>云响</div><div class="online">● 已连接 NewAPI</div><div class="g">工作台</div><button class="nav">我的概览</button><button class="nav">数据统计</button><button class="nav on">可补空回</button><div class="g">我的</div><button class="nav">我的申请</button><button class="nav">补偿记录</button><button class="nav">补偿规则</button><div class="foot">退出</div></aside>
+  <aside class="side"><div class="brand"><span class="logo">云</span>云响</div><div class="online">● 已连接 云中猫API小站</div><div class="g">工作台</div><button class="nav">我的概览</button><button class="nav">数据统计</button><button class="nav on">可补空回</button><div class="g">我的</div><button class="nav">我的申请</button><button class="nav">补偿记录</button><button class="nav">补偿规则</button><div class="foot">退出</div></aside>
   <div class="main"><header class="top"><span>工作台 <i>/</i> 可补空回</span><div class="tools"><span class="icon">搜</span><span class="icon">日</span><span class="avatar">测</span></div></header>
     <div class="page"><div class="kicker">MY WORKSPACE</div><h1>可补空回</h1><p class="sub">查询当前账号。正常自动补，异常才进入人工审批。</p>
       <div class="card row"><div><div class="who"><span class="avatar">测</span>当前账号 · fixture-user</div><div style="height:12px"></div><span class="pill ok">累计补回 · 额度 165.00</span></div><button class="btn">查询空回</button></div>
@@ -117,7 +117,7 @@
     </div>
   </div>
 </section>
-<section id="login" class="hide"><div class="login app"><div class="story"><div class="brand"><span class="logo">云</span>云响</div><div class="kicker">补偿工作台</div><h1>空了有回响，<br>额度回到余额。</h1><p class="sub">使用 NewAPI 原账号登录。Logo 自动读取原站。</p></div><div class="form"><form><div class="kicker">WELCOME</div><h1>登录</h1><label>用户名<input placeholder="原站用户名"></label><label>密码<input placeholder="原站密码" type="password"></label><button class="btn" type="button">登录工作台</button><p class="sub">不创建独立账号 · 密码不落库</p></form></div></div></section>
+<section id="login" class="hide"><div class="login app"><div class="story"><div class="brand"><span class="logo">云</span>云响</div><div class="kicker">补偿工作台</div><h1>空了有回响，<br>额度回到余额。</h1><p class="sub">使用 云中猫API小站 原账号登录。Logo 自动读取原站。</p></div><div class="form"><form><div class="kicker">WELCOME</div><h1>登录</h1><label>用户名<input placeholder="原站用户名"></label><label>密码<input placeholder="原站密码" type="password"></label><button class="btn" type="button">登录工作台</button><p class="sub">不创建独立账号 · 密码不落库</p></form></div></div></section>
 <script>
   const ids=['refund','stats','admin','login'];
   function show(id){ids.forEach(x=>document.getElementById(x).classList.toggle('hide',x!==id));document.querySelectorAll('.switcher button').forEach(b=>b.classList.toggle('on',b.dataset.s===id));}

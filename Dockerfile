@@ -1,6 +1,7 @@
 FROM node:24-bookworm-slim AS test
 WORKDIR /app
-COPY package.json ./
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 COPY src ./src
 COPY public ./public
 COPY test ./test
@@ -13,6 +14,7 @@ ENV NODE_ENV=production HOST=0.0.0.0 PORT=3210 DATA_DIR=/app/data
 WORKDIR /app
 RUN mkdir -p /app/data && chown node:node /app/data
 COPY --from=test --chown=node:node /app/package.json ./
+COPY --from=test --chown=node:node /app/node_modules ./node_modules
 COPY --from=test --chown=node:node /app/src ./src
 COPY --from=test --chown=node:node /app/public ./public
 USER node

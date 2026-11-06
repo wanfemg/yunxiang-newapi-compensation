@@ -10,6 +10,8 @@ docker-compose.yml.pending
 secrets/
 data/
 coverage/
+node_modules/
+.playwright-cli/
 test-results/
 output/playwright/
 *.log

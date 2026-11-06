@@ -4,7 +4,7 @@ import { candidates, deploymentPlan, composePlan } from '../src/deployment.mjs';
 
 const container=(overrides={})=>({Name:'/new-api',State:{Running:true},Config:{Image:'calciumion/new-api:latest',Env:['PORT=3000'],Labels:{}},HostConfig:{NetworkMode:'custom'},NetworkSettings:{Networks:{newapi_default:{}},Ports:{}},...overrides});
 
-test('deployment discovery only selects running NewAPI/OneAPI containers',()=>{
+test('deployment discovery only selects running 云中猫API小站/OneAPI containers',()=>{
   assert.equal(candidates([container(),container({State:{Running:false}}),container({Name:'/redis',Config:{Image:'redis:7'}})]).length,1);
 });
 test('deployment detects Compose bridge and honors explicit network and port',()=>{
@@ -24,7 +24,7 @@ test('default bridge uses published loopback port without altering original netw
   c.NetworkSettings.Ports['3000/tcp']=[{HostIp:'192.0.2.1',HostPort:'3100'}];
   assert.throws(()=>deploymentPlan(c));
 });
-test('deployment metadata never persists NewAPI database credentials',()=>{
+test('deployment metadata never persists 云中猫API小站 database credentials',()=>{
   const c=container({Config:{Env:['SQL_DSN=user:very-secret@tcp(mysql:3306)/newapi','SESSION_SECRET=another-secret']}});
   const p=deploymentPlan(c);assert.equal(p.database.main.type,'mysql');assert.doesNotMatch(JSON.stringify(p),/very-secret|another-secret/);
 });

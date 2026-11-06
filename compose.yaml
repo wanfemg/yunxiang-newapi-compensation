@@ -13,7 +13,7 @@ services:
       DATA_DIR: /app/data
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Run bash deploy.sh first}
       NEWAPI_URL: ${NEWAPI_URL:?Run bash deploy.sh first}
-      NEWAPI_ADMIN_USER_ID: ${NEWAPI_ADMIN_USER_ID:?Set original NewAPI admin user ID}
+      NEWAPI_ADMIN_USER_ID: ${NEWAPI_ADMIN_USER_ID:?设置云中猫API小站站长用户 ID}
       NEWAPI_ADMIN_TOKEN_FILE: /run/secrets/newapi_admin_token
       NEWAPI_DB_CONFIG_FILE: /run/secrets/newapi_database
       ALLOW_HTTP_UPSTREAM: ${ALLOW_HTTP_UPSTREAM:-0}
@@ -49,4 +49,4 @@ volumes:
 networks:
   newapi:
     external: true
-    name: ${NEWAPI_NETWORK:?Set existing NewAPI Docker network}
+    name: ${NEWAPI_NETWORK:?设置云中猫API小站现有 Docker 网络}

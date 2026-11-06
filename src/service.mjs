@@ -24,7 +24,7 @@ export class Compensation {
     return c;
   }
   view(c, admin = false) {
-    const aiReview = this.store.aiReview(c.request_id, logFingerprint(c.log), process.env.AI_PROMPT_VERSION || 'empty-v1');
+    const aiReview = this.store.aiReview(c.request_id, logFingerprint(c.log), this.ai.promptVersion?.() || 'empty-v1');
     if (admin) return {...c,fundingSource:fundingSource(c.log),compensationLabel:compensationLabel(c.log,c.source),expectedAmount:expectedQuota(c.log,c.rules),aiReview};
     const { rules, log, operator_id, attempt_id, verification_note, confirmed_unreturned, ...safe } = c;
     return { ...safe, log: publicLog(log), fundingSource:fundingSource(log),compensationLabel:compensationLabel(log,c.source),ruleVersion: rules.version,expectedAmount:expectedQuota(log,rules) };
@@ -112,7 +112,7 @@ export class Compensation {
     let aiReview = null;
     const activeRules = this.store.rules();
     if (activeRules.aiEnabled) {
-      this.store.event(claim.id,user.id,'ai_review_started',{promptVersion:process.env.AI_PROMPT_VERSION||'empty-v1'});
+      this.store.event(claim.id,user.id,'ai_review_started',{promptVersion:this.ai.promptVersion?.()||'empty-v1'});
       this.store.notifyClaim('ai_reviewing',claim,'正在读取日志、补偿规则与重复申请记录');
       try {
         aiReview = await this.ai.review(claim.log, activeRules);
@@ -121,7 +121,7 @@ export class Compensation {
           requestId: claim.request_id,
           userId: claim.user_id,
           fingerprint: logFingerprint(claim.log),
-          promptVersion: process.env.AI_PROMPT_VERSION || 'empty-v1',
+          promptVersion: this.ai.promptVersion?.() || 'empty-v1',
           decision: 'uncertain',
           confidence: 0,
           reason: error instanceof AppError ? error.message : 'AI 服务暂不可用，转管理员审核',
@@ -175,7 +175,7 @@ export class Compensation {
       if (!rules.executionEnabled) throw new AppError('补偿执行暂未开放');
       if(automatic){
         if(!rules.applicationsEnabled||!isOpen(rules,Date.now()))throw new AppError('自助补偿开放时间或开关已变更');
-        const aiReview = this.store.aiReview(c.request_id, logFingerprint(original), process.env.AI_PROMPT_VERSION || 'empty-v1');
+        const aiReview = this.store.aiReview(c.request_id, logFingerprint(original), this.ai.promptVersion?.() || 'empty-v1');
         const decision=selfServiceDecision(original,{id:c.user_id},rules,Date.now(),aiReview);
         if(!decision.automatic)throw new AppError(decision.reasons.join('；'));
         const originalDecision=selfServiceDecision(original,{id:c.user_id},{...rules,selfServiceMaxQuota:Math.min(rules.selfServiceMaxQuota,c.rules.selfServiceMaxQuota),selfServiceMinAgeSeconds:Math.max(rules.selfServiceMinAgeSeconds,c.rules.selfServiceMinAgeSeconds)},Date.now(),aiReview);
@@ -191,7 +191,7 @@ export class Compensation {
       catch (e) {
         return this.store.transition(id, ['executing'], e instanceof UpstreamError && e.definitive ? 'failed' : 'unknown', user.id, e instanceof UpstreamError && e.definitive ? '原站明确拒绝，未返还；需核查后重新审核' : '请求结果不明，须核对原站到账凭据；禁止直接重试');
       }
-      return this.store.transition(id, ['executing'], 'succeeded', user.id, 'NewAPI 明确返回成功');
+      return this.store.transition(id, ['executing'], 'succeeded', user.id, '云中猫API小站 明确返回成功');
     } finally { this.locks.delete(id); }
   }
   reconcile(user, id, outcome, note) {

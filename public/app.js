@@ -1,6 +1,8 @@
 import {formatQuota,inputQuota,parseQuota} from './display.js';
 import {enhanceControls} from './controls.js';
 import {renderSnapshot,bindSnapshot} from './snapshot.js';
+import {notificationCenter,emailPreview} from './notification-center.js';
+import {watchUIVersion} from './ui-version.js';
 const canonicalOrigin = document.querySelector('meta[name="application-origin"]')?.content;
 if (canonicalOrigin && new URL(canonicalOrigin).protocol === 'https:' && location.origin !== canonicalOrigin) {
   location.replace(canonicalOrigin + '/');
@@ -16,12 +18,12 @@ const quotaFields=new Set(['perRecordQuota','selfServiceMaxQuota','userDailyQuot
 let catalog=null,aiConfig=null,adminStatus='pending',adminDrill=null,pickedModels=new Set(),claimGroup=null;
 let excludedModels=new Map();
 const modelRuleKey=(channelId,model)=>JSON.stringify([channelId,model]);
-let storagePlan=null;
+let storagePlan=null,notificationTab='ding';
 const fundingLabel=source=>({subscription:'订阅额度 · 站长审批',wallet:'钱包余额',unknown:'资金来源待核实'}[source]||'资金来源待核实');
 const compensationLabel=c=>c?.compensationLabel||(c?.fundingSource==='subscription'?'订阅空回 · 余额补偿':c?.source==='manual'?'人工空回补偿':'空回补偿');
 const statuses = {pending:'待审核',approved:'已通过 · 待执行',rejected:'已驳回',executing:'执行中',succeeded:'补偿成功',failed:'明确失败',unknown:'结果待确认'};
 const pages = {overview:'我的概览',statistics:'数据统计',logs:'可补空回日志',claims:'我的申请',records:'补偿记录',rules:'补偿规则',help:'使用教程与答疑',adminOverview:'管理概览',adminLogs:'原始消费查询',adminClaims:'申请处理中心',stats:'补偿统计',settings:'补偿规则设置',notifications:'钉钉通知',audit:'操作记录'};
-const eventNames = {application_pending:'申请待审核',review_result:'审核结果',compensation_success:'补偿成功',execution_failed:'执行失败',execution_unknown:'结果待确认',ai_reviewing:'AI 审查开始',ai_reviewed:'AI 判定结果',ai_auto_compensation:'AI 审查通过 · 自动补额度',ai_manual_review:'AI 不确定 · 转人工审核'};
+const eventNames = {application_pending:'申请待审核',review_result:'审核结果',compensation_success:'补偿成功',execution_failed:'执行失败',execution_unknown:'结果待确认',ai_reviewing:'AI 审查开始',ai_reviewed:'AI 判定结果',ai_auto_compensation:'AI 审查通过 · 自动补额度',ai_manual_review:'AI 不确定 · 转人工审核',batch_result:'批量申请汇总'};
 const filters = {model:'',requestId:'',channel:'',view:'eligible',status:'',start:'',end:''};
 let statKind = 'users';
 let currentLogs=[], operation=null;
@@ -61,7 +63,7 @@ async function api(path, method='GET', body) {
   const owner=s.user,page=s.page;
   document.documentElement.classList.add('network-loading');api.pending=(api.pending||0)+1;
   try{
-  const r=await fetch(path,{method,credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:body===undefined?undefined:JSON.stringify(body)});
+  const r=await fetch(path,{method,cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:body===undefined?undefined:JSON.stringify(body)});
   const value=await r.json();
   if(!path.startsWith('/api/auth/')&&(owner!==s.user||(method==='GET'&&page!==s.page)))throw Error('页面或账号已切换，已忽略旧请求');
   if(!r.ok||!value.success){if(r.status===401&&!path.startsWith('/api/auth/')) loginView();throw Error(value.message||'请求失败');}return value.data;
@@ -83,7 +85,7 @@ async function render(){
   $('#content').classList.remove('is-fetching');$('#content').removeAttribute('aria-busy');
   nav();$('#page-title').textContent=pages[s.page];$('#breadcrumb').textContent=pages[s.page];$('#page-subtitle').textContent=s.page==='statistics'?'查看当前账号的补回额度与每日趋势。':s.page==='help'?'了解查询、审核、补偿和失败处理流程。':'正常自助返还，异常提交审批。每笔处理有据可查。';$('#page-kicker').textContent=['overview','statistics','logs','claims','records','rules','help'].includes(s.page)?'MY WORKSPACE':'ADMINISTRATION';$('#content').innerHTML=loading('正在读取记录…');$('#refresh').hidden=s.page==='statistics';
   try{if(s.page.endsWith('Overview')||s.page==='overview')await overview();else if(s.page==='statistics')await personalStatistics();else if(['logs','adminLogs'].includes(s.page))await logs();else if(['claims','records','adminClaims'].includes(s.page))await claims();else if(['rules','settings'].includes(s.page))await rules();else if(s.page==='help')help();else if(s.page==='stats')await stats();else if(s.page==='notifications')await notifications();else await audit();icons();}
-  catch(e){if(owner!==s.user||page!==s.page)return;$('#content').innerHTML='<div class="notice warning">'+esc(e.message)+'</div><p class="muted">核对 NewAPI 连接与管理凭据后刷新。页面不使用示例数据替代真实记录。</p>';}
+  catch(e){if(owner!==s.user||page!==s.page)return;$('#content').innerHTML='<div class="notice warning">'+esc(e.message)+'</div><p class="muted">核对 云中猫API小站 连接与管理凭据后刷新。页面不使用示例数据替代真实记录。</p>';}
 }
 async function overview(){
   const admin=s.page==='adminOverview',p=admin?'/api/admin':'/api';
@@ -103,7 +105,7 @@ async function overview(){
 }
 function help(){
   const steps=[
-    ['1','登录工作台','使用 NewAPI 原账号登录；勾选“保持登录”后，本工作台会保持 30 天。'],
+    ['1','登录工作台','使用 云中猫API小站 原账号登录；勾选“保持登录”后，本工作台会保持 30 天。'],
     ['2','查询空回','进入“可补空回日志”，点击查询空回，按模型、请求标识或时间范围筛选。'],
     ['3','核对内容','展开模型分组，查看原请求、模型、扣费额度和系统判定；先核对再勾选。'],
     ['4','提交申请','选择记录后点击自助补额度。符合规则的记录自动处理，异常记录会进入管理员审核。'],
@@ -121,7 +123,7 @@ function help(){
     ['保持登录有效多久？','普通登录默认保持 8 小时；勾选“保持登录”后保持 30 天。退出登录会立即使当前会话失效。'],
     ['如何切换暗色和亮色？','点击右上角主题按钮即可切换，选择会保存在当前浏览器。']
   ];
-  $('#content').innerHTML='<div class="help-hero"><div><span class="eyebrow">GUIDE & FAQ</span><h2>使用教程与问题答疑</h2><p>从查询空回到补偿到账，每一步都能查看依据、状态和处理结果。</p></div><button class="secondary" data-nav="logs">'+icon('search')+'开始查询空回</button></div>'+panel('快速上手','<div class="help-steps">'+steps.map(([n,t,d])=>'<div class="help-step"><span>'+n+'</span><div><strong>'+t+'</strong><p>'+d+'</p></div></div>').join('')+'</div>')+panel('常见问题','<div class="help-faq">'+faqs.map(([q,a])=>'<details><summary>'+esc(q)+icon('chevron-down')+'</summary><p>'+esc(a)+'</p></details>').join('')+'</div>')+'<div class="notice">处理结果以 NewAPI 原站记录和管理员核验为准。任何显示“失败”或“结果待确认”的记录都不会自动重复发放。</div>';
+  $('#content').innerHTML='<div class="help-hero"><div><span class="eyebrow">GUIDE & FAQ</span><h2>使用教程与问题答疑</h2><p>从查询空回到补偿到账，每一步都能查看依据、状态和处理结果。</p></div><button class="secondary" data-nav="logs">'+icon('search')+'开始查询空回</button></div>'+panel('快速上手','<div class="help-steps">'+steps.map(([n,t,d])=>'<div class="help-step"><span>'+n+'</span><div><strong>'+t+'</strong><p>'+d+'</p></div></div>').join('')+'</div>')+panel('常见问题','<div class="help-faq">'+faqs.map(([q,a])=>'<details><summary>'+esc(q)+icon('chevron-down')+'</summary><p>'+esc(a)+'</p></details>').join('')+'</div>')+'<div class="notice">处理结果以 云中猫API小站 原站记录和管理员核验为准。任何显示“失败”或“结果待确认”的记录都不会自动重复发放。</div>';
 }
 function filterInput(name,label,type='text'){return '<label>'+label+'<input name="'+name+'" type="'+type+'" value="'+esc(filters[name])+'"></label>';}
 function refundRecordsMarkup(data){
@@ -164,7 +166,7 @@ async function logs(){
     $('#content').innerHTML=refundHeader(meta.overview,true)+'<section class="refund-candidates"><div class="refund-history-heading"><h3>可补额度与模型</h3><span>当前查询页</span></div><div class="preview-summary"><div><small>可补额度</small><strong class="amount">'+money(expected)+' </strong></div><div><small>涉及模型</small><strong>'+new Set(available.map(v=>v.log.model_name)).size+'</strong></div><div><small>可申请记录</small><strong>'+available.length+' <em>笔</em></strong></div></div><div class="selection-bar"><label class="check-label"><input type="checkbox" id="select-page">全选本页可申请记录</label><span id="selection-summary" role="status" aria-live="polite"></span><button class="primary" id="batch-apply" disabled>自助补额度</button></div>'+grouped+'<details class="filter-disclosure"><summary>筛选条件</summary>'+toolbar+'</details>'+pager(data.total,shown.length)+'</section>'+skippedModelsMarkup(data)+refundRecordsMarkup(meta.records);
     currentLogs=shown;available.forEach(v=>selectedLogs.add(v.log.request_id));updateLogSelection();icons();return;
   }
-  $('#content').innerHTML='<div class="scope-strip"><span class="site-pill"><i></i>当前 NewAPI 实例</span><span class="scope-caption">单实例 · 原站身份 · 异常审批</span></div><section class="panel refund-controls"><div><span class="badge neutral">本页查询预览</span><p>符合条件的消费自助返还，异常记录转审批。</p></div><div class="action-row"><button class="secondary" id="query-empty">'+icon('search')+' 查询空回</button><button class="primary" id="batch-apply" disabled>自助补额度</button></div></section><details class="filter-disclosure"><summary>筛选条件 <span>模型、请求标识与时间范围</span></summary>'+toolbar+'</details><div class="preview-summary"><div><small>本页展示</small><strong>'+shown.length+' <em>笔</em></strong></div><div><small>符合申请条件</small><strong>'+available.length+' <em>笔</em></strong></div><div><small>预计返还 · 非到账</small><strong class="amount">'+money(expected)+' </strong></div></div><div class="selection-bar"><label class="check-label"><input type="checkbox" id="select-page">全选本页可申请记录</label><span id="selection-summary" role="status" aria-live="polite"></span></div>'+panel('模型汇总',grouped||empty(data.items.length?'本页无匹配日志，调整筛选或翻页继续查看':'本页没有消费记录'),'仅当前页 · '+groups.size+' 个模型；展开后勾选具体消费')+'<div class="notice">零输出仅是候选。缺乏证据须人工核实；订阅消费转站长审批，审核通过后补入钱包余额。金额按原站配置显示。本页无匹配不代表全部历史无候选。</div>'+pager(data.total,shown.length);
+  $('#content').innerHTML='<div class="scope-strip"><span class="site-pill"><i></i>当前 云中猫API小站 实例</span><span class="scope-caption">单实例 · 原站身份 · 异常审批</span></div><section class="panel refund-controls"><div><span class="badge neutral">本页查询预览</span><p>符合条件的消费自助返还，异常记录转审批。</p></div><div class="action-row"><button class="secondary" id="query-empty">'+icon('search')+' 查询空回</button><button class="primary" id="batch-apply" disabled>自助补额度</button></div></section><details class="filter-disclosure"><summary>筛选条件 <span>模型、请求标识与时间范围</span></summary>'+toolbar+'</details><div class="preview-summary"><div><small>本页展示</small><strong>'+shown.length+' <em>笔</em></strong></div><div><small>符合申请条件</small><strong>'+available.length+' <em>笔</em></strong></div><div><small>预计返还 · 非到账</small><strong class="amount">'+money(expected)+' </strong></div></div><div class="selection-bar"><label class="check-label"><input type="checkbox" id="select-page">全选本页可申请记录</label><span id="selection-summary" role="status" aria-live="polite"></span></div>'+panel('模型汇总',grouped||empty(data.items.length?'本页无匹配日志，调整筛选或翻页继续查看':'本页没有消费记录'),'仅当前页 · '+groups.size+' 个模型；展开后勾选具体消费')+'<div class="notice">零输出仅是候选。缺乏证据须人工核实；订阅消费转站长审批，审核通过后补入钱包余额。金额按原站配置显示。本页无匹配不代表全部历史无候选。</div>'+pager(data.total,shown.length);
   currentLogs=shown;updateLogSelection();icons();
 }
 async function claims(){
@@ -234,7 +236,8 @@ async function settingsPage(r){
   const channels=catalog?.channels||[],channelSelector='<div class="catalog-options">'+channels.map(c=>'<label class="catalog-choice"><input type="checkbox" name="channel-choice" value="'+c.id+'" '+(r.channels.includes(c.id)?'checked':'')+'><span><strong>'+esc(c.name)+'</strong><small>ID '+c.id+' · '+(c.status===1?'运行中':'停用 · 仅人工审核')+' · '+c.models.length+' 个模型</small></span></label>').join('')+r.channels.filter(id=>!channels.some(c=>c.id===id)).map(id=>'<label class="catalog-choice"><input type="checkbox" name="channel-choice" value="'+id+'" checked><span>渠道 #'+id+'<small>已删除 · 保留历史补偿审核</small></span></label>').join('')+'</div>';
   const groupSelector='<div class="catalog-options">'+groups.map(group=>'<label class="catalog-choice"><input name="group-choice" type="checkbox" value="'+esc(group)+'" '+(r.userGroups.includes(group)?'checked':'')+'><span>'+esc(group)+'</span></label>').join('')+'</div>';
   $('#content').innerHTML=(error?'<div class="notice warning">原站渠道或用户组读取失败：'+esc(error)+'。保存已禁用，刷新后重试。</div>':'')+'<form id="rules-form"><section class="settings-band"><h3>开放与自动审批</h3><div class="settings-switches">'+['applicationsEnabled','executionEnabled','selfServiceEnabled'].map((key,i)=>'<label class="switch-line"><span>'+['开放补偿申请','开放额度返还','正常记录自动审批'][i]+'</span><input role="switch" name="'+key+'" type="checkbox" '+(r[key]?'checked':'')+'></label>').join('')+'</div></section><section class="settings-band"><h3>日志与每日重置</h3><div class="form-grid"><label>最多读取最近多少天的日志<input name="lookbackDays" type="number" min="1" max="3650" step="1" required value="'+Math.ceil(r.applicationHours/24)+'"></label><label>每日额度与次数重置时间<input name="dailyResetTime" type="time" value="'+(r.dailyResetTime||'00:00')+'" required></label><label>结算时区<select name="timezone">'+[...new Set([r.timezone,'Asia/Shanghai','UTC','Asia/Hong_Kong','Asia/Tokyo','America/New_York','Europe/London'])].map(zone=>'<option value="'+esc(zone)+'" '+(zone===r.timezone?'selected':'')+'>'+esc(zone)+'</option>').join('')+'</select></label></div></section><section class="settings-band"><h3>额度与次数</h3><div class="form-grid">'+numericInputs+'</div><p class="field-help">额度单位：'+esc(s.display?.label||'未读取')+' · 每笔原消费计一次，执行中与待对账金额预占限额。</p></section><section class="settings-band"><h3>可补用户组</h3>'+groupSelector+'<p class="field-help">未选择表示全部原站用户组。</p></section><section class="settings-band"><h3>可补渠道</h3><input id="channel-search" type="search" placeholder="搜索渠道名称或 ID" aria-label="搜索渠道">'+channelSelector+'</section><section class="settings-band"><h3>可补模型</h3><label class="switch-line"><span>限定模型范围</span><input role="switch" type="checkbox" name="restrictModels" '+(r.restrictModels?'checked':'')+'></label><input id="model-search" type="search" placeholder="搜索所选渠道的模型" aria-label="搜索模型"><div id="catalog-models"></div><p class="field-help">下架、删除模型或停用渠道的历史空回进入人工审核。</p></section><section class="settings-band"><h3>其他设置</h3><div class="form-grid"><label>排除用户 ID（逗号分隔）<input name="blockedUsers" value="'+esc(r.blockedUsers.join(','))+'"></label><label class="check-label"><input type="checkbox" name="notificationsEnabled" '+(r.notifications.enabled?'checked':'')+'>开启钉钉通知</label></div></section><div class="form-actions"><button class="primary" '+(!catalog||!s.display?'disabled':'')+'>保存规则</button></div></form>';
-  $('#content').insertAdjacentHTML('afterbegin','<section class="settings-band ai-settings"><div class="settings-title-row"><div><h3>AI 空回判定</h3><p class="field-help">AI 根据日志与当前规则综合分析空回；高置信度空回才自动补偿，其余结果转管理员。关闭后继续使用原有空回规则。</p></div><span class="config-state '+(aiConfig?.configured?'is-ready':'')+'">'+(aiConfig?.configured?'已配置':'未配置')+'</span></div><label class="switch-line"><span>启用 AI 辅助判定</span><input form="rules-form" role="switch" name="aiEnabled" type="checkbox" '+(r.aiEnabled?'checked':'')+'></label><div class="form-grid"><label>自动通过置信度（%）<input form="rules-form" name="aiAutoThreshold" type="number" min="70" max="100" step="1" value="'+(r.aiAutoThreshold||90)+'"></label><label>单用户每日 AI 审核次数<input form="rules-form" name="aiDailyLimit" type="number" min="1" max="1000" step="1" value="'+(r.aiDailyLimit||30)+'"></label></div><div class="ai-config-grid"><label>API 地址<input id="ai-base-url" value="'+esc(aiConfig?.baseUrl||'')+'" placeholder="https://api.example.com/v1"></label><label>模型<select id="ai-model"><option value="">先拉取模型</option>'+(aiConfig?.model?'<option selected value="'+esc(aiConfig.model)+'">'+esc(aiConfig.model)+'</option>':'')+'</select></label><label>API 密钥<input id="ai-api-key" type="password" placeholder="'+esc(aiConfig?.apiKeyMasked?'保持不变 · '+aiConfig.apiKeyMasked:'服务端密钥')+'" autocomplete="new-password"></label><label>超时时间（毫秒）<input id="ai-timeout" type="number" min="3000" max="120000" step="1000" value="'+(aiConfig?.timeoutMs||15000)+'"></label></div><div class="ai-config-actions"><button type="button" class="secondary" id="ai-fetch-models">'+icon('download')+'拉取模型</button><button type="button" class="secondary" id="ai-test-config">'+icon('plug-zap')+'测试连接</button><button type="button" class="primary" id="ai-save-config">'+icon('save')+'保存 API 配置</button><span id="ai-config-message" class="field-help" role="status"></span></div></section>');
+  const defaultPrompt='你是额度补偿审核助手。只根据提供的日志和规则判断是否疑似空回，不决定金额，不执行任何操作。必须只返回 JSON：{"decision":"empty|not_empty|uncertain","confidence":0到1,"reason":"简短中文理由","evidence":["证据"]}。证据不足必须返回 uncertain。';
+  $('#content').insertAdjacentHTML('afterbegin','<section class="settings-band ai-settings"><div class="settings-title-row"><div><h3>AI 空回判定</h3><p class="field-help">AI 根据日志与当前规则综合分析空回；高置信度空回才自动补偿，其余结果转管理员。关闭后继续使用原有空回规则。</p></div><span class="config-state '+(aiConfig?.configured?'is-ready':'')+'">'+(aiConfig?.configured?'已配置':'未配置')+'</span></div><label class="switch-line"><span>启用 AI 辅助判定</span><input form="rules-form" role="switch" name="aiEnabled" type="checkbox" '+(r.aiEnabled?'checked':'')+'></label><div class="form-grid"><label>自动通过置信度（%）<input form="rules-form" name="aiAutoThreshold" type="number" min="70" max="100" step="1" value="'+(r.aiAutoThreshold||90)+'"></label><label>单用户每日 AI 审核次数<input form="rules-form" name="aiDailyLimit" type="number" min="1" max="1000" step="1" value="'+(r.aiDailyLimit||30)+'"></label></div><div class="ai-config-grid"><label>API 地址<input id="ai-base-url" value="'+esc(aiConfig?.baseUrl||'')+'" placeholder="https://api.example.com/v1"></label><label>拉取模型<select id="ai-model-pick"><option value="">先拉取模型</option>'+(aiConfig?.model?'<option selected value="'+esc(aiConfig.model)+'">'+esc(aiConfig.model)+'</option>':'')+'</select></label><label>当前使用模型名称<input id="ai-model" value="'+esc(aiConfig?.model||'')+'" placeholder="手动输入模型 ID"></label><label>API 密钥<input id="ai-api-key" type="password" placeholder="'+esc(aiConfig?.apiKeyMasked?'保持不变 · '+aiConfig.apiKeyMasked:'服务端密钥')+'" autocomplete="new-password"></label><label>超时时间（毫秒）<input id="ai-timeout" type="number" min="3000" max="120000" step="1000" value="'+(aiConfig?.timeoutMs||15000)+'"></label></div><label class="full ai-prompt-field">AI 判定提示词<textarea id="ai-prompt" rows="7" maxlength="12000">'+esc(aiConfig?.prompt||defaultPrompt)+'</textarea><small class="field-help">提示词会随日志与规则发送给 AI；修改后会生成新的判定版本，不会复用旧结果。</small></label><div class="ai-config-actions"><button type="button" class="secondary" id="ai-fetch-models">'+icon('download')+'拉取模型</button><button type="button" class="secondary" id="ai-test-config">'+icon('plug-zap')+'测试连接</button><button type="button" class="primary" id="ai-save-config">'+icon('save')+'保存 API 配置</button><span id="ai-config-message" class="field-help" role="status"></span></div></section>');
   $('#content').insertAdjacentHTML('beforeend','<section class="settings-band"><h3>本地数据存储</h3>'+lines([['数据库',storage.engine+' · '+(storage.persistent?'持久化存储':'内存演示，重启清空')],['日志模式',storage.journalMode],['申请账本',storage.claims+' 笔'],['日志缓存范围',storage.logs],['审计记录',storage.events],['数据库大小',num(storage.bytes)+' 字节']])+'<p class="field-help">'+(storage.persistent?'更新镜像保留数据卷。数据库快照与机器人加密密钥需一起备份，恢复旧账本前须对账。':'当前为本地演示预览。正式启动自动创建独立 SQLite 数据库，申请与发放去重记录持久保存。')+'</p></section>');
   $('#content').insertAdjacentHTML('beforeend','<section class="settings-band storage-management"><h3>数据库清理</h3><div class="preview-summary"><div><small>通知记录</small><strong>'+num(storage.notifications)+'</strong></div><div><small>本地快照</small><strong>'+num(storage.backups.count)+'</strong></div><div><small>库内可回收空间</small><strong>'+num(storage.freeBytes)+' <em>字节</em></strong></div></div><form id="storage-form"><div class="form-grid">'+[['cache','过期查询缓存','cacheDays',7,1],['notifications','已结束通知记录','notificationDays',30,7],['backups','旧数据库快照','backupDays',30,7]].map(([key,label,days,value,min])=>'<div class="storage-option"><label class="check-label"><input type="checkbox" name="'+key+'" '+(key==='backups'?'':'checked')+'>清理'+label+'</label><label>保留最近天数<input type="number" name="'+days+'" min="'+min+'" max="3650" step="1" required value="'+value+'"></label></div>').join('')+'</div><label class="check-label storage-compact"><input type="checkbox" name="compact">整理数据库空间</label><p class="field-help">申请、发放去重账本、审计、待发送通知及密钥不清理。快照至少保留最新 3 份。空间整理可能短暂阻塞查询，请在低峰执行。</p><button type="submit" class="secondary">'+icon('scan-search')+'预览清理</button></form></section>');
   $('#model-search').closest('.settings-band').querySelector('.field-help').textContent='不可补规则优先；下架、删除模型未被排除时进入人工审核。';
@@ -302,11 +305,10 @@ async function renderStatisticsDrill(){
   $('#detail-body').innerHTML='<h3>'+esc(d.value)+' · 补偿明细</h3>'+table(['用户','模型','补偿额度','状态',''],data.items.map(c=>'<tr><td>'+esc(c.username)+'<span class="sub">ID '+c.user_id+'</span></td><td>'+esc(c.log.model_name)+'</td><td>'+money(c.amount)+'</td><td>'+badge(c.status)+'</td><td><button class="ghost" data-detail="'+c.id+'">申请详情</button></td></tr>'))+'<div class="pagination"><span>共 '+data.total+' 笔</span><div><button class="ghost" data-drill-turn="-1" '+(d.page<=1?'disabled':'')+'>上一页</button><span>'+d.page+'</span><button class="ghost" data-drill-turn="1" '+(d.page*30>=data.total?'disabled':'')+'>下一页</button></div></div>';icons();
 }
 async function notifications(){
-  const [n,r]=await Promise.all([api('/api/admin/notifications'),api('/api/admin/rules')]);s.rules=r;
-  const notificationEvents=Object.entries(eventNames).filter(([key])=>r.aiEnabled||!key.startsWith('ai_'));
-  const template=(r.aiEnabled?'### AI 审查通过 · 自动补额度\n- **申请号**：实际申请号\n- **用户 / 模型**：原站用户 · 原消费模型\n- **AI 判定**：空回 · 高置信度\n- **补回额度**：':'### 空回补额度成功\n- **申请号**：实际申请号\n- **用户 / 模型**：原站用户 · 原消费模型\n- **补回额度**：')+money(500)+'\n- **状态**：已确认到账\n- **处理说明**：NewAPI 明确返回成功\n- **时间**：'+new Date().toLocaleString('zh-CN',{timeZone:r.timezone,hour12:false});
-  $('#content').innerHTML='<div class="notice">配置只在服务端加密保存，密钥不回显。失败最多重试 5 次；超时可能造成通知重复，不会重复执行补偿。'+(r.aiEnabled?' AI 审查开始、判定结果、自动补额度及转人工审核均提供独立通知事件。':' AI 审查已关闭，通知维持原有审核与补偿流程。')+'</div>'+panel('钉钉加签机器人','<form id="notification-form" class="panel-body"><div class="form-grid"><label class="full">Webhook 地址<input name="webhook" type="password" autocomplete="off" placeholder="'+(n.config.configured?'已配置，留空保持':'输入钉钉官方机器人地址')+'"></label><label class="full">加签密钥<input name="secret" type="password" autocomplete="off" placeholder="'+(n.config.signed?'已配置，留空保持':'输入加签密钥')+'"></label><label class="check-label"><input name="enabled" type="checkbox" '+(r.notifications.enabled?'checked':'')+'>通知总开关</label>'+notificationEvents.map(([k,v])=>'<label class="check-label"><input name="events" type="checkbox" value="'+k+'" '+(r.notifications.events.includes(k)?'checked':'')+'>'+v+'</label>').join('')+'</div><div class="form-actions"><button class="primary">保存通知设置</button><button type="button" id="test-notification" class="secondary">发送测试</button></div></form>')+panel('发送记录',n.items.length?table(['事件','状态','尝试次数','结果','时间'],n.items.map(v=>'<tr><td>'+esc(eventNames[v.event]||v.event)+'</td><td>'+esc(v.status)+'</td><td>'+v.attempts+'</td><td>'+esc(v.result||'等待发送')+'</td><td>'+date(v.created_at)+'</td></tr>')):empty('还没有发送记录'));
-  $('#content').insertAdjacentHTML('beforeend',panel('Markdown 通知预览','<div class="panel-body"><pre class="notification-preview">'+esc(template)+'</pre></div>'));
+  const [n,r,e]=await Promise.all([api('/api/admin/notifications'),api('/api/admin/rules'),api('/api/admin/email-notifications')]);s.rules=r;
+  $('#content').innerHTML=notificationCenter({n,r,e,esc,panel,table,empty,money,date,icon,eventNames,tab:notificationTab});
+  $('#email-template-preview').innerHTML=emailPreview('approved',money,esc);
+  icons();
 }
 async function audit(){const data=await api('/api/admin/audit');$('#content').innerHTML=panel('最近 100 条操作',data.length?table(['操作人','动作','关联申请','时间','详情'],data.map(v=>'<tr><td>#'+esc(v.actor_id)+'</td><td>'+esc(v.action)+'</td><td>'+esc(v.claim_id||'配置操作')+'</td><td>'+date(v.created_at)+'</td><td><details><summary>查看</summary><pre>'+esc(JSON.stringify(JSON.parse(v.detail),null,2))+'</pre></details></td></tr>')):empty('暂无操作记录'));}
 function showOperation(title,body,op){operation=op;$('#operation-title').textContent=title;$('#operation-body').hidden=false;$('#operation-body').innerHTML=body;$('#operation-error').textContent='';$('#operation-results').replaceChildren();$('#operation-submit').hidden=false;$('#operation-submit').disabled=false;$('#operation-submit').textContent=op.kind==='apply'?(op.automatic?'确认核验并返还':'确认提交审批'):'确认处理';$('#operation-form .dialog-footer [data-close-operation]').textContent='取消';$('#detail-dialog').close();$('#operation-dialog').showModal();}
@@ -357,12 +359,13 @@ async function submitOperation(form){
   icons();
   button.hidden=true;operation=null;form.querySelectorAll('input,textarea').forEach(el=>el.disabled=true);
 }
+document.addEventListener('change',event=>{if(event.target.id==='ai-model-pick'&&event.target.value){const input=$('#ai-model');if(input)input.value=event.target.value;}});
 document.addEventListener('click',async event=>{const b=event.target.closest('button');if(!b||s.busy)return;busyButton(b,true);try{
   if(['ai-fetch-models','ai-test-config','ai-save-config'].includes(b.id)){
-    const message=$('#ai-config-message'),payload={baseUrl:$('#ai-base-url')?.value.trim(),model:$('#ai-model')?.value.trim(),apiKey:$('#ai-api-key')?.value,timeoutMs:Number($('#ai-timeout')?.value||15000)};
+    const message=$('#ai-config-message'),payload={baseUrl:$('#ai-base-url')?.value.trim(),model:$('#ai-model')?.value.trim(),prompt:$('#ai-prompt')?.value.trim(),apiKey:$('#ai-api-key')?.value,timeoutMs:Number($('#ai-timeout')?.value||15000)};
     if(b.id==='ai-save-config'){aiConfig=await api('/api/admin/ai-config','PUT',payload);message.textContent='API 配置已保存，密钥已在服务端保留。';}
     else if(b.id==='ai-test-config'){await api('/api/admin/ai-config','PUT',payload);await api('/api/admin/ai-config/test','POST',{});message.textContent='连接测试成功。';}
-    else {await api('/api/admin/ai-config','PUT',payload);const data=await api('/api/admin/ai-config/models');const select=$('#ai-model');select.innerHTML='<option value="">选择模型</option>'+data.items.map(item=>'<option value="'+esc(item.id)+'">'+esc(item.name)+'</option>').join('');if(aiConfig?.model)select.value=aiConfig.model;message.textContent='已拉取 '+data.items.length+' 个模型。';}
+    else {await api('/api/admin/ai-config','PUT',payload);const data=await api('/api/admin/ai-config/models');const select=$('#ai-model-pick');select.innerHTML='<option value="">选择模型</option>'+data.items.map(item=>'<option value="'+esc(item.id)+'">'+esc(item.name)+'</option>').join('');if(payload.model)select.value=payload.model;const wrapper=select.closest('.glass-select');const trigger=wrapper?.querySelector('.glass-select-trigger'),menu=wrapper?.querySelector('.glass-options');if(trigger)trigger.textContent=select.selectedOptions[0]?.textContent||'选择模型';if(menu){menu.replaceChildren(...[...select.options].map(option=>{const button=document.createElement('button');button.type='button';button.textContent=option.textContent;button.dataset.value=option.value;button.setAttribute('role','option');button.addEventListener('click',()=>{select.value=option.value;$('#ai-model').value=option.value;trigger.textContent=option.textContent;menu.hidePopover();select.dispatchEvent(new Event('change',{bubbles:true}));});return button;}));}message.textContent='已拉取 '+data.items.length+' 个模型，请从上方选择或手动输入模型名称。';}
     message.className='field-help success-text';icons();return;
   }
   if(b.id==='storage-confirm'){
@@ -385,6 +388,11 @@ document.addEventListener('click',async event=>{const b=event.target.closest('bu
   if(b.id==='search-close'){$('#search-dialog').close();return;}
   if(b.id==='statistics-refresh'){b.disabled=true;try{await personalStatistics();}finally{b.disabled=false;}return;}
   if(b.dataset.nav){await navigate(b.dataset.nav);return;}
+  if(b.dataset.notificationTab){
+    notificationTab=b.dataset.notificationTab;
+    document.querySelectorAll('[data-notification-tab]').forEach(el=>{const selected=el.dataset.notificationTab===notificationTab;el.setAttribute('aria-selected',String(selected));el.tabIndex=selected?0:-1;});
+    for(const key of ['ding','email'])$('#notify-panel-'+key).hidden=key!==notificationTab;return;
+  }
   if(b.id==='account-logout'){$('#logout').click();return;}
   if(b.id==='theme-toggle'){document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark';try{localStorage.setItem('huixiang-theme',document.documentElement.dataset.theme);}catch{}theme();return;}
   if(b.hasAttribute('data-close-operation')){$('#operation-dialog').close();operation=null;return;}
@@ -398,6 +406,7 @@ $('#page-search').addEventListener('input',searchPages);
 document.addEventListener('toggle',event=>{if(event.target.matches?.('.refund-record'))event.target.querySelector('summary').setAttribute('aria-label',event.target.open?'收起补回记录':'展开补回记录');},true);
 document.addEventListener('change',event=>{
   const el=event.target;
+  if(el.id==='email-preview-event')$('#email-template-preview').innerHTML=emailPreview(el.value,money,esc);
   if(el.name==='model-choice'){
     if(el.checked){
       pickedModels.add(el.value);
@@ -432,6 +441,8 @@ document.addEventListener('click',event=>{
 document.addEventListener('change',async event=>{try{if(event.target.id==='statistics-days'){statisticsDays=Number(event.target.value);await personalStatistics();}else if(event.target.id==='statistics-auto'){statisticsAuto=event.target.checked;if(statisticsAuto)scheduleStatistics();else stopStatistics();}}catch(e){toast(e.message);}});
 document.addEventListener('click',event=>{if(!event.target.closest('.account')){$('#account-menu').hidden=true;$('#account-toggle').setAttribute('aria-expanded','false');}});
 document.addEventListener('keydown',event=>{
+  const tab=event.target.closest('[data-notification-tab]');
+  if(tab&&['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const target=event.key==='Home'?'ding':event.key==='End'?'email':tab.dataset.notificationTab==='ding'?'email':'ding';const button=document.querySelector('[data-notification-tab='+target+']');button.click();button.focus();return;}
   if(event.key==='Escape'){if($('#workspace').classList.contains('drawer-open')){setDrawer(false);event.preventDefault();}if(!$('#account-menu').hidden){$('#account-menu').hidden=true;$('#account-toggle').setAttribute('aria-expanded','false');$('#account-toggle').focus();}}
   if(event.key==='Tab'&&$('#workspace').classList.contains('drawer-open')){const items=[...$('.sidebar').querySelectorAll('button:not([disabled])')],first=items[0],last=items.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}
 });
@@ -446,7 +457,7 @@ document.addEventListener('submit',async event=>{
       icons();$('#detail-dialog').showModal();
     }else if(form.id==='operation-form'){await submitOperation(form);} else if(['login-form','verify-form'].includes(form.id)){
       $('#login-message').textContent='';let data;
-      if(form.id==='login-form'){const password=f.get('password');form.elements.password.value='';data=await api('/api/auth/login','POST',{username:f.get('username'),password});}
+      if(form.id==='login-form'){const password=f.get('password');form.elements.password.value='';data=await api('/api/auth/login','POST',{username:f.get('username'),password,remember:f.has('remember')});}
       else data=await api('/api/auth/verify','POST',{challengeId:s.challenge,code:f.get('code')});
       if(data.requireVerification){s.challenge=data.challengeId;$('#login-form').hidden=true;$('#verify-form').hidden=false;toast('原站要求二次验证，输入动态验证码。Passkey 等方式尚未接入。');}
       else{$('#verify-form').reset();$('#verify-form').hidden=true;$('#login-form').hidden=false;await enter(data);}
@@ -454,16 +465,25 @@ document.addEventListener('submit',async event=>{
     else if(form.id==='claim-filter'){filters.status=f.get('status');s.n=1;await claims();}
     else if(form.id==='rules-form'){
       const r=structuredClone(s.rules),displayedQuotas={};for(const [k]of numeric){if(quotaFields.has(k))displayedQuotas[k]=String(f.get(k));else r[k]=Number(f.get(k));}for(const k of ['applicationsEnabled','executionEnabled','selfServiceEnabled','restrictModels','aiEnabled'])r[k]=f.has(k);for(const k of ['aiAutoThreshold','aiDailyLimit'])r[k]=Number(f.get(k));r.channels=f.getAll('channel-choice').map(Number);r.blockedUsers=String(f.get('blockedUsers')).split(/[,，\s]+/).filter(Boolean).map(Number);r.models=[...pickedModels];r.excludedModels=[...excludedModels.values()];r.userGroups=f.getAll('group-choice');r.timezone=f.get('timezone');r.dailyResetTime=f.get('dailyResetTime');r.notifications.enabled=f.has('notificationsEnabled');await api('/api/admin/rules','PUT',{...r,lookbackDays:Number(f.get('lookbackDays')),displayedQuotas,displayRevision:s.display?.revision});toast('规则已保存并记录新版本');await rules();
+    }else if(form.id==='email-notification-form'){
+      const events=f.getAll('events');
+      await api('/api/admin/email-notifications','PUT',{version:s.rules.version,host:f.get('host'),port:Number(f.get('port')),security:f.get('security'),username:f.get('username'),password:f.get('password'),fromEmail:f.get('fromEmail'),fromName:f.get('fromName'),enabled:f.has('enabled'),events});
+      toast('邮箱通知设置已保存');await notifications();
+    }else if(form.id==='email-test-form'){
+      const feedback=form.querySelector('[data-form-feedback]');feedback.className='muted';feedback.textContent='正在连接 SMTP 并发送测试邮件…';
+      const result=await api('/api/admin/email-notifications/test','POST',{to:String(f.get('to')).trim()});
+      feedback.textContent='SMTP 已接受发往 '+result.to+' 的测试邮件，请检查收件箱与垃圾邮件。';
+      delete form.dataset.edited;
     }else if(form.id==='notification-form'){
       const webhook=f.get('webhook').trim(),secret=f.get('secret').trim();if(webhook||secret)await api('/api/admin/notifications','PUT',{...(webhook?{webhook}:{}),...(secret?{secret}:{})});const r=structuredClone(s.rules);r.notifications={enabled:f.has('enabled'),events:f.getAll('events')};await api('/api/admin/rules','PUT',r);toast('通知设置已保存');await notifications();
     }
-  }catch(e){if(['login-form','verify-form'].includes(form.id)){$('#login-message').textContent=e.message;$('#login-form').hidden=false;$('#verify-form').hidden=true;}else if(form.id==='operation-form')$('#operation-error').textContent=e.message;else toast(e.message);}
+  }catch(e){if(['login-form','verify-form'].includes(form.id)){$('#login-message').textContent=e.message;$('#login-form').hidden=false;$('#verify-form').hidden=true;}else if(form.id==='operation-form')$('#operation-error').textContent=e.message;else {const feedback=form.querySelector('[data-form-feedback]');if(feedback){feedback.className='error';feedback.textContent=e.message;}toast(e.message);}}
   finally{s.busy=false;if(b){b.disabled=false;busyButton(b,false);}}
 });
 async function loadBrand(){
   try{
     const brand=await api('/api/brand');
-    document.title='云响 · NewAPI 补空回';
+    document.title='云响 · 云中猫API小站 补空回';
     const mobile=document.querySelector('.mobile-brand');if(mobile)mobile.textContent='云响';
     if(brand.logo)for(const root of document.querySelectorAll('[data-brand-logo]')){
       const img=new Image();img.alt='云响 Logo';img.referrerPolicy='no-referrer';
@@ -472,4 +492,6 @@ async function loadBrand(){
   }catch{}
 }
 loadBrand();
+pages.notifications='通知中心';
+watchUIVersion({isBusy:()=>s.busy||api.pending>0,notify:toast});
 try{await enter(await api('/api/me'));}catch{loginView();}

@@ -43,7 +43,7 @@ export function databaseSummary(config) {
   if (!config || config.version !== 1 || !config.main?.type || !config.logs?.type) throw new Error('数据库识别配置格式无效');
   const allowed = new Set(['mysql', 'postgresql', 'sqlite', 'clickhouse']);
   if (!allowed.has(config.main.type) || !allowed.has(config.logs.type)) throw new Error('数据库类型无效');
-  return `主库 ${config.main.type}；日志库 ${config.logs.sameAs === 'main' ? '与主库共用' : config.logs.type}；仅识别配置，未直连数据库，补款仍走 NewAPI 接口。`;
+  return `主库 ${config.main.type}；日志库 ${config.logs.sameAs === 'main' ? '与主库共用' : config.logs.type}；仅识别配置，未直连数据库，补款仍走 云中猫API小站 接口。`;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

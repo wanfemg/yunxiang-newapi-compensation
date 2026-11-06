@@ -36,13 +36,13 @@ source_dir=$(dirname -- "$source_dir")
 # Normalize downloaded scripts too: archives from older releases may use CRLF.
 while IFS= read -r -d '' script; do sed -i 's/\r$//' "$script"; done < <(find "$source_dir" -type f -name '*.sh' -print0)
 sed -i 's/\r$//' "$source_dir/Dockerfile"
-for item in src public test Dockerfile .dockerignore .gitattributes package.json auto-deploy.sh install.sh status.sh README.md; do
+for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh install.sh status.sh README.md; do
   [[ -e $source_dir/$item ]] || { echo "发布包缺少 $item"; exit 1; }
 done
-for item in src public test Dockerfile .dockerignore .gitattributes package.json auto-deploy.sh install.sh status.sh README.md; do
+for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh install.sh status.sh README.md; do
   [[ ! -L $target/$item ]] || { echo "安装路径是符号链接：$item"; exit 1; }
 done
-for item in src public test Dockerfile .dockerignore .gitattributes package.json auto-deploy.sh install.sh status.sh README.md; do cp -R -- "$source_dir/$item" "$target/"; done
+for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh install.sh status.sh README.md; do cp -R -- "$source_dir/$item" "$target/"; done
 mkdir -p -- "$target/docs"
 [[ ! -L $target/docs ]] || { echo '文档目录是符号链接。'; exit 1; }
 [[ ! -f $source_dir/docs/one-click.md ]] || cp -- "$source_dir/docs/one-click.md" "$target/docs/one-click.md"

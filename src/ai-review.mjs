@@ -3,6 +3,7 @@ import { AppError } from './rules.mjs';
 
 const decisionSet = new Set(['empty', 'not_empty', 'uncertain']);
 const safe = (value, max = 4000) => String(value ?? '').slice(0, max);
+const DEFAULT_PROMPT = '你是额度补偿审核助手。只根据提供的日志和规则判断是否疑似空回，不决定金额，不执行任何操作。必须只返回 JSON：{"decision":"empty|not_empty|uncertain","confidence":0到1,"reason":"简短中文理由","evidence":["证据"]}。证据不足必须返回 uncertain。';
 
 export function logFingerprint(log) {
   const fields = ['request_id', 'user_id', 'model_name', 'channel', 'quota', 'prompt_tokens', 'completion_tokens', 'is_stream', 'other', 'created_at'];
@@ -17,13 +18,18 @@ export class AIReviewer {
     const c = this.config();
     return Boolean(c.baseUrl && c.apiKey && c.model);
   }
+  promptVersion() {
+    const custom = String(this.env.AI_PROMPT ?? this.store?.aiConfig?.().prompt ?? '').trim();
+    return String(this.env.AI_PROMPT_VERSION || (custom ? createHash('sha256').update(this.config().prompt).digest('hex').slice(0,16) : 'empty-v1'));
+  }
   config() {
     const stored = this.store?.aiConfig?.() || {};
     return {
       baseUrl: String(this.env.AI_BASE_URL ?? stored.baseUrl ?? '').trim(),
       apiKey: String(this.env.AI_API_KEY ?? stored.apiKey ?? ''),
       model: String(this.env.AI_MODEL ?? stored.model ?? '').trim(),
-      timeoutMs: Number(this.env.AI_TIMEOUT_MS ?? stored.timeoutMs ?? 15000)
+      timeoutMs: Number(this.env.AI_TIMEOUT_MS ?? stored.timeoutMs ?? 15000),
+      prompt: String(this.env.AI_PROMPT ?? stored.prompt ?? DEFAULT_PROMPT).trim() || DEFAULT_PROMPT
     };
   }
   async request(path, options = {}) {
@@ -36,20 +42,30 @@ export class AIReviewer {
     });
   }
   async models() {
-    const response = await this.request('/models');
-    if (!response.ok) throw new AppError(`AI 模型接口返回 HTTP ${response.status}`, 502);
+    const base = this.config().baseUrl.replace(/\/+$/, '');
+    const paths = /\/v\d+$/i.test(base) ? ['/models'] : ['/models', '/v1/models'];
+    let response;
+    for (const path of paths) {
+      response = await this.request(path);
+      if (response.ok) break;
+    }
+    if (!response?.ok) {
+      let detail = '';
+      try { detail = String((await response.json())?.error?.message || '').slice(0, 160); } catch {}
+      throw new AppError(`AI 模型接口返回 HTTP ${response?.status || 502}${detail ? `：${detail}` : ''}`, 502);
+    }
     const body = await response.json();
-    const items = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+    const items = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : Array.isArray(body?.result) ? body.result : [];
     return items.map(item => typeof item === 'string' ? { id: item, name: item } : { id: String(item.id || item.name || ''), name: String(item.name || item.id || '') })
       .filter(item => item.id).slice(0, 1000);
   }
   async test() {
     const c = this.config();
-    const response = await this.request('/models');
-    return { ok: response.ok, model: c.model, status: response.status };
+    const items = await this.models();
+    return { ok: true, model: c.model, status: 200, models:items.length };
   }
   async review(log, rules) {
-    const promptVersion = String(this.env.AI_PROMPT_VERSION || 'empty-v1');
+    const promptVersion = this.promptVersion();
     const fingerprint = logFingerprint(log);
     const existing = this.store.aiReview(log.request_id, fingerprint, promptVersion);
     if (existing) return existing;
@@ -66,7 +82,7 @@ export class AIReviewer {
       temperature: 0,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: '你是额度补偿审核助手。只根据提供的日志和规则判断是否疑似空回，不决定金额，不执行任何操作。必须只返回 JSON：{"decision":"empty|not_empty|uncertain","confidence":0到1,"reason":"简短中文理由","evidence":["证据"]}。证据不足必须返回 uncertain。' },
+        { role: 'system', content: config.prompt },
         { role: 'user', content: JSON.stringify({ log: { request_id: log.request_id, user_id: log.user_id, model_name: log.model_name, channel: log.channel, quota: log.quota, prompt_tokens: log.prompt_tokens, completion_tokens: log.completion_tokens, is_stream: log.is_stream, created_at: log.created_at, other: safe(log.other) }, rules: { refundBasisPoints: rules.refundBasisPoints, selfServiceMaxQuota: rules.selfServiceMaxQuota, selfServiceMinAgeSeconds: rules.selfServiceMinAgeSeconds, excludedModels: rules.excludedModels, models: rules.models } }) }
       ]
     };

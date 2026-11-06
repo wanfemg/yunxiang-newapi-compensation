@@ -35,7 +35,7 @@ node_tool(){ docker run --rm -i --network none --read-only --cap-drop ALL --secu
 json_get(){ node_tool --input-type=module -e 'import fs from "node:fs";let x=JSON.parse(fs.readFileSync(0,"utf8"));for(const k of process.argv[1].split("."))x=x?.[k];process.stdout.write(typeof x==="object"?JSON.stringify(x):String(x??""));' "$1"; }
 valid_port(){ [[ $1 =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
 if [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.json ]]; then
-  echo '复用已有接入配置与持久数据卷，更新云响，不修改 NewAPI。'
+  echo '复用已有接入配置与持久数据卷，更新云响，不修改 云中猫API小站。'
 else
   [[ ! -e .env.auto && ! -e compose.generated.json ]] || { echo '部署配置不完整，保留现有文件；核对 .env.auto、compose.generated.json 和数据库识别文件后重试。'; exit 1; }
   container=${NEWAPI_CONTAINER:-}
@@ -47,12 +47,12 @@ else
     count=$(printf '%s' "$choices" | node_tool --input-type=module -e 'import fs from "node:fs";console.log(JSON.parse(fs.readFileSync(0,"utf8")).length)')
     if [[ $count == 1 ]]; then container=$(printf '%s' "$choices" | json_get 0.name);
     elif [[ $count != 0 ]]; then
-      printf '检测到多个 NewAPI 候选：\n%s\n' "$choices"
-      prompt '选择 NewAPI 容器名称: ' ''; container=$REPLY
+      printf '检测到多个 云中猫API小站 候选：\n%s\n' "$choices"
+      prompt '选择 云中猫API小站 容器名称: ' ''; container=$REPLY
       [[ -n $container ]] || { echo '未选择容器。'; exit 1; }
     else
-      echo '未发现 NewAPI 容器，使用主机服务或远程 API 接入。'
-      prompt 'NewAPI 地址 [http://127.0.0.1:3000]: ' 'http://127.0.0.1:3000'; url=$REPLY
+      echo '未发现 云中猫API小站 容器，使用主机服务或远程 API 接入。'
+      prompt '云中猫API小站 地址 [http://127.0.0.1:3000]: ' 'http://127.0.0.1:3000'; url=$REPLY
     fi
   fi
   if [[ -n $container ]]; then
@@ -78,7 +78,7 @@ else
   prompt "云响 HTTPS 域名 [http://127.0.0.1:$app_port]: " "${PUBLIC_ORIGIN:-http://127.0.0.1:$app_port}"; origin=${REPLY%/}
   [[ $origin =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?$ || $origin == "http://127.0.0.1:$app_port" ]] || { echo '域名须为不带路径的 HTTPS 地址。'; exit 1; }
   admin_id=${NEWAPI_ADMIN_USER_ID:-}
-  if [[ -z $admin_id ]]; then prompt 'NewAPI 站长用户 ID: ' ''; admin_id=$REPLY; fi
+  if [[ -z $admin_id ]]; then prompt '云中猫API小站 站长用户 ID: ' ''; admin_id=$REPLY; fi
   [[ $admin_id =~ ^[1-9][0-9]*$ ]] || { echo '站长 ID 无效。'; exit 1; }
   # Compose interprets dollar signs: reject config interpolation in URLs.
   [[ $url != *'$'* && $url != *$'\n'* ]] || { echo '原站地址格式无效。'; exit 1; }
@@ -93,7 +93,7 @@ if [[ ! -s secrets/newapi_admin_token ]]; then
     [[ -r $NEWAPI_ADMIN_TOKEN_FILE ]] || { echo '管理令牌文件不可读。'; exit 1; }
     token=$(< "$NEWAPI_ADMIN_TOKEN_FILE")
   elif [[ -z $token && $non_interactive == 0 && -r /dev/tty && -w /dev/tty ]]; then
-    printf 'NewAPI 管理令牌（隐藏输入）: ' > /dev/tty
+    printf '云中猫API小站 管理令牌（隐藏输入）: ' > /dev/tty
     IFS= read -r -s token < /dev/tty; printf '\n' > /dev/tty
   fi
   [[ -n $token && ! $token =~ [[:space:]] ]] || { echo '令牌无效。'; exit 1; }
@@ -129,4 +129,4 @@ echo '宝塔镜像搜索：yunxiang-newapi-compensation（同时检查本地镜�
 echo '备份：docker compose -p newapi-compensation -f docker-compose.yml exec -T compensation node src/backup.mjs'
 echo '诊断：bash status.sh；日志：docker compose -p newapi-compensation -f docker-compose.yml logs --tail 100 compensation'
 echo '更新：在本目录运行 bash install.sh；下载式更新使用原一键命令。'
-echo '登录：使用原 NewAPI 用户或站长账号；生产不会创建演示账号。'
+echo '登录：使用原 云中猫API小站 用户或站长账号；生产不会创建演示账号。'

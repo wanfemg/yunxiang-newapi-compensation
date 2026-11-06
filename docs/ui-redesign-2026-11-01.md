@@ -13,14 +13,14 @@
 - node --check public/app.js：通过。
 - test/browser-smoke.mjs：站长各页、保存规则、用户登录、日志、移动端和详情通过。
 - test/ui-redesign.mjs：深浅主题、模型展开、申请失败保留依据、提交不发放、审核、空白核验金额填写、执行、成功历史、390px 无整体横溢出、侧栏和减少动态效果路径通过；页面无 JS 异常，模拟上游恰有一次增额。
-- 全部流程使用本机内存夹具，不连接真实 NewAPI，不代表真实余额或钉钉送达验证。
+- 全部流程使用本机内存夹具，不连接真实 云中猫API小站，不代表真实余额或钉钉送达验证。
 
 截图：test-results/redesign-desktop.png、redesign-light.png、redesign-confirmation.png、redesign-history.png、redesign-mobile.png。
 
 运行浏览器回归需设置 PLAYWRIGHT_MODULE_PATH 到已安装 playwright，Windows 可设置 PLAYWRIGHT_CHANNEL=msedge。
 
 ## 仍有边界
-这是第一轮参考式复刻，不宣称像素级一比一；未加入多实例、全量候选索引或自动补款。真实部署前继续完成原站接口、权限及到账联调。没有修改部署、数据库发现、NewAPI 源项目与额度执行代码。
+这是第一轮参考式复刻，不宣称像素级一比一；未加入多实例、全量候选索引或自动补款。真实部署前继续完成原站接口、权限及到账联调。没有修改部署、数据库发现、云中猫API小站 源项目与额度执行代码。
 
 ## 第二轮：控制台交互补齐
 - 移动端使用 320px 侧滑抽屉，包含分组导航、当前页面高亮、独立滚动和固定退出区。支持关闭按钮、遮罩、Escape、Tab 焦点圈定、背景 inert 与滚动锁定；导航后自动关闭，跨断点恢复桌面侧栏。

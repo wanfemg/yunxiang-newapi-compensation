@@ -41,18 +41,22 @@ export class DingTalk {
     try {
       const config = this.config();
       if (!config.webhook) return;
-      const rows = this.store.db.prepare("SELECT * FROM notifications WHERE status='pending' AND next_at<=? ORDER BY id LIMIT 10").all(Date.now());
+      const now = Date.now();
+      this.store.db.prepare("UPDATE notifications SET status='pending',result='发送进程中断，已重新排队' WHERE status='sending' AND next_at<?").run(now - 120000);
+      const rows = this.store.db.prepare("SELECT * FROM notifications WHERE status='pending' AND next_at<=? ORDER BY id LIMIT 10").all(now);
       for (const row of rows) {
         if (row.event !== 'notification_test' && !this.store.rules().notifications.events.includes(row.event)) {
           this.store.db.prepare("UPDATE notifications SET status='cancelled',result='事件开关已关闭' WHERE id=?").run(row.id); continue;
         }
+        const claimed = this.store.db.prepare("UPDATE notifications SET status='sending',next_at=? WHERE id=? AND status='pending'").run(Date.now() + 120000, row.id);
+        if (!claimed.changes) continue;
         const url = new URL(config.webhook), timestamp = String(Date.now());
         url.searchParams.set('timestamp', timestamp);
         url.searchParams.set('sign', createHmac('sha256', config.secret).update(`${timestamp}\n${config.secret}`).digest('base64'));
         let success = false;
         try {
           let markdown;try{markdown=JSON.parse(row.body);}catch{}
-          if(!markdown||typeof markdown.title!=='string'||typeof markdown.text!=='string')markdown={title:'NewAPI 补空回通知',text:'### NewAPI 补空回通知\n\n'+String(row.body).replace(/[<>@]/g,' ')};
+          if(!markdown||typeof markdown.title!=='string'||typeof markdown.text!=='string')markdown={title:'云中猫API小站 补空回通知',text:'### 云中猫API小站 补空回通知\n\n'+String(row.body).replace(/[<>@]/g,' ')};
           const response = await this.fetcher(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ msgtype: 'markdown', markdown,at:{isAtAll:false} }), redirect: 'error', signal: AbortSignal.timeout(8000) });
           success = response.ok && (await response.json()).errcode === 0;
         } catch {}

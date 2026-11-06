@@ -1,4 +1,4 @@
-// Local fixture only. Never connects to the reference website or production NewAPI.
+// Local fixture only. Never connects to the reference website or production 云中猫API小站.
 import {createRequire} from 'node:module';
 import assert from 'node:assert/strict';
 import {mkdirSync} from 'node:fs';

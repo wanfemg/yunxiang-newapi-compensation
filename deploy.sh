@@ -8,9 +8,9 @@ umask 077
 mkdir -p secrets
 chmod 700 secrets
 if [[ ! -s secrets/newapi_database.json || "${REFRESH_NEWAPI_DB:-0}" == 1 ]]; then
-  echo '自动识别数据库：只读取所选 NewAPI 容器的配置，不连接数据库、不修改原站。'
+  echo '自动识别数据库：只读取所选 云中猫API小站 容器的配置，不连接数据库、不修改原站。'
   docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
-  read -r -p '用于识别数据库的 NewAPI 容器名称 [new-api]: ' db_container
+  read -r -p '用于识别数据库的 云中猫API小站 容器名称 [new-api]: ' db_container
   db_container=${db_container:-new-api}
   [[ "$db_container" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || { echo '容器名称格式不支持。'; exit 1; }
   if [[ -f .env.docker ]]; then
@@ -38,17 +38,17 @@ if [[ ! -f .env.docker ]]; then
   docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
   container=${db_container:-}
   if [[ -z "$container" ]]; then
-    read -r -p 'NewAPI 容器名称 [new-api]: ' container
+    read -r -p '云中猫API小站 容器名称 [new-api]: ' container
     container=${container:-new-api}
   fi
   docker inspect --type container "$container" >/dev/null
   networks=$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$container")
-  printf 'NewAPI 已连接网络：\n%s\n' "$networks"
+  printf '云中猫API小站 已连接网络：\n%s\n' "$networks"
   read -r -p '选择一个上方的用户自定义 bridge 网络: ' network
   printf '%s\n' "$networks" | grep -Fx -- "$network" >/dev/null || { echo '网络不属于该容器。'; exit 1; }
   [[ "$network" != bridge && "$network" != host && "$network" != none ]] || { echo '需要用户自定义 bridge 网络。'; exit 1; }
   [[ $(docker network inspect --format '{{.Driver}}' "$network") == bridge ]] || { echo '本脚本支持同机 bridge 网络。'; exit 1; }
-  read -r -p 'NewAPI 容器内部端口 [3000]: ' upstream_port
+  read -r -p '云中猫API小站 容器内部端口 [3000]: ' upstream_port
   upstream_port=${upstream_port:-3000}
   read -r -p '补空回宿主机回环端口 [3210]: ' app_port
   app_port=${app_port:-3210}
@@ -68,7 +68,7 @@ fi
 if [[ ! -s secrets/newapi_admin_token ]]; then
   mkdir -p secrets
   chmod 700 secrets
-  read -r -s -p 'NewAPI 管理令牌（隐藏输入，非推理 sk- 密钥）: ' token
+  read -r -s -p '云中猫API小站 管理令牌（隐藏输入，非推理 sk- 密钥）: ' token
   printf '\n'
   [[ -n "$token" && ! "$token" =~ [[:space:]] ]] || { echo '令牌不能为空或包含空白。'; exit 1; }
   (umask 077; printf '%s' "$token" > secrets/newapi_admin_token)

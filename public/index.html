@@ -2,18 +2,18 @@
 <html lang="zh-CN" data-theme="dark">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark light"><title>云响 · NewAPI 补空回</title>
+  <meta name="color-scheme" content="dark light"><title>云响 · 云中猫API小站 补空回</title>
   <link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/glass.css"><script src="/icons.js" defer></script><script type="module" src="/app.js"></script>
 </head>
 <body>
   <div id="toast" role="status" aria-live="polite" hidden></div>
   <section id="login" class="login-layout">
-    <div class="login-story"><div class="brand"><span class="brand-icon" data-brand-logo><i data-lucide="cloud"></i></span> 云响 <small>NEWAPI COMPENSATION</small></div>
+    <div class="login-story"><div class="brand"><span class="brand-icon" data-brand-logo><i data-lucide="cloud"></i></span> 云响 <small>云中猫API小站</small></div>
       <span class="eyebrow">云响 · 补偿工作台</span><h1>空了有回响，<br>额度回到余额。</h1><p>查询空回、选择模型、补回额度。<br>正常自动到账，异常才进入审批。</p>
       <div class="story-foot"><span>01 原账号身份</span><span>02 逐笔可追溯</span><span>03 异常审批</span></div>
     </div>
-    <div class="login-form-wrap"><div class="login-card"><span class="eyebrow">WELCOME BACK</span><h2>登录补偿工作台</h2><p class="muted">使用已有的 NewAPI 账号，无需重新注册。</p>
-      <form id="login-form"><label>NewAPI 用户名<input name="username" autocomplete="username" required maxlength="100" placeholder="输入原站用户名"></label><label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="1024" placeholder="输入原站密码"></label><label class="check-label remember-login"><input name="remember" type="checkbox">保持登录 30 天</label><button class="primary wide" type="submit">登录工作台 <span>→</span></button></form>
+    <div class="login-form-wrap"><div class="login-card"><span class="eyebrow">WELCOME BACK</span><h2>登录补偿工作台</h2><p class="muted">使用已有的 云中猫API小站 账号，无需重新注册。</p>
+      <form id="login-form"><label>云中猫API小站 用户名<input name="username" autocomplete="username" required maxlength="100" placeholder="输入原站用户名"></label><label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="1024" placeholder="输入原站密码"></label><label class="check-label remember-login"><input name="remember" type="checkbox">保持登录 30 天</label><button class="primary wide" type="submit">登录工作台 <span>→</span></button></form>
       <form id="verify-form" hidden><label>动态验证码<input name="code" autocomplete="one-time-code" inputmode="numeric" required pattern="[0-9]{6,8}" placeholder="输入原站二次验证码"></label><button class="primary wide" type="submit">验证并登录</button></form>
       <p id="login-message" role="alert" class="error"></p><div class="login-note">不创建独立账号 · 密码不落库<br>实际补偿以原消费核验及审核结果为准</div>
     </div></div>
@@ -22,7 +22,7 @@
     <button id="drawer-backdrop" class="drawer-backdrop" aria-label="关闭导航" hidden tabindex="-1"></button>
     <aside class="sidebar" id="console-navigation" aria-label="工作台导航"><div class="drawer-brand"><div class="brand"><span class="brand-icon" data-brand-logo><i data-lucide="cloud"></i></span> 云响</div><button id="drawer-close" class="ghost icon-button" aria-label="关闭菜单" title="关闭菜单"><i data-lucide="x"></i></button></div><nav id="nav" aria-label="主导航"></nav><div class="sidebar-bottom"><button id="logout" class="ghost logout-button"><i data-lucide="log-out"></i>退出</button></div></aside>
     <div class="main-shell"><header class="topbar"><div class="topbar-location"><button id="menu-toggle" class="ghost icon-button" aria-label="切换导航" title="菜单" aria-controls="console-navigation" aria-expanded="false"><i data-lucide="menu"></i></button><strong class="mobile-brand">云响</strong><span class="breadcrumb">工作台 <b>/</b> <span id="breadcrumb">我的概览</span></span></div><div class="account"><button id="search-toggle" class="ghost icon-button" aria-label="搜索页面或功能" title="搜索页面或功能"><i data-lucide="search"></i></button><button id="theme-toggle" class="ghost icon-button" aria-label="切换浅色模式" title="切换主题"></button><button id="account-toggle" class="avatar-button" aria-label="账号菜单" aria-expanded="false" aria-controls="account-menu">回</button><div id="account-menu" class="account-menu" hidden><strong id="account-name"></strong><button data-nav="overview"><i data-lucide="user"></i>个人概览</button><button data-nav="rules"><i data-lucide="shield-check"></i>补偿规则</button><button id="account-logout"><i data-lucide="log-out"></i>退出登录</button></div></div></header>
-      <main><div class="page-heading"><div><span class="eyebrow" id="page-kicker">WORKSPACE</span><h1 id="page-title">我的概览</h1><p id="page-subtitle" class="muted"></p></div><button id="refresh" class="secondary">↻ 刷新</button></div><section id="content" aria-live="polite"></section><footer>云响 · NewAPI 补空回 <span>原站额度 · 自动核验 · 异常审批</span></footer></main>
+      <main><div class="page-heading"><div><span class="eyebrow" id="page-kicker">WORKSPACE</span><h1 id="page-title">我的概览</h1><p id="page-subtitle" class="muted"></p></div><button id="refresh" class="secondary">↻ 刷新</button></div><section id="content" aria-live="polite"></section><footer>云响 · 云中猫API小站 补空回 <span>原站额度 · 自动核验 · 异常审批</span></footer></main>
     </div>
   </div>
   <dialog id="search-dialog" aria-labelledby="search-title"><div class="dialog-header"><h2 id="search-title">搜索页面</h2><button id="search-close" class="ghost icon-button" aria-label="关闭搜索" title="关闭搜索"><i data-lucide="x"></i></button></div><input id="page-search" type="search" aria-label="页面名称" placeholder="搜索页面或功能…" autocomplete="off"><div id="search-results"></div></dialog>
