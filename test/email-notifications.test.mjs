@@ -27,6 +27,18 @@ test('邮箱配置加密、空密码保留、配置与规则原子更新且检�
   assert.throws(()=>f.mail.save({...config,version:version-1},1),/已更新/);
   assert.throws(()=>f.mail.save({...config,fromName:'bad\r\nname'},1));
 });
+test('已有邮箱设置升级时默认加入审核未通过事件并刷新配置版本',t=>{
+  const directory=mkdtempSync(join(tmpdir(),'mail-migrate-')),path=join(directory,'data.sqlite');
+  let store=new Store(path);
+  t.after(()=>{store.close();rmSync(directory,{recursive:true,force:true});});
+  const old={...store.rules(),emailNotifications:{enabled:true,events:['approved','succeeded','failed','unknown']}};
+  store.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify(old));
+  store.db.prepare("DELETE FROM metadata WHERE key='email_rejected_event_migrated'").run();
+  store.close();store=new Store(path);
+  assert.ok(store.rules().emailNotifications.events.includes('rejected'));
+  assert.equal(store.rules().emailNotifications.enabled,true);
+  assert.equal(store.rules().version,old.version+1);
+});
 test('同用户多模型合一封，按申请与事件去重，账户邮箱不用作收件地址',async t=>{
   const f=setup(t),a=f.claim('a'),b=f.claim('b',{log:log('b',{model_name:'second-model'})});
   await f.mail.notifyClaims('approved',[a,b]);await f.mail.notifyClaims('approved',[a]);
@@ -35,6 +47,15 @@ test('同用户多模型合一封，按申请与事件去重，账户邮箱不�
   assert.match(f.sent[0][3],/申请数量：2 笔/);assert.match(f.sent[0][3],/等待额度补偿/);assert.match(f.sent[0][3],/预计补偿额度/);
   assert.equal(f.rows()[0].status,'sent');assert.ok(!f.rows()[0].recipient.includes('notify@example.com'));
   const c=f.claim('c');await f.mail.notifyClaims('approved',[a,c]);await f.mail.flush();assert.equal(f.sent.length,2);assert.match(f.sent[1][3],/申请数量：1 笔/);
+});
+test('审核未通过邮件包含管理员驳回意见并按用户多模型合并',async t=>{
+  const f=setup(t),a=f.claim('rejected-a',{status:'rejected',review_note:'日志显示存在有效输出'}),b=f.claim('rejected-b',{status:'rejected',review_note:'原消费已有退款'});
+  await f.mail.notifyClaims('rejected',[a,b]);await f.mail.flush();
+  assert.equal(f.rows().length,1);
+  assert.equal(JSON.parse(f.rows()[0].body).subject,'【云响补空回】你的空回补偿申请审核未通过');
+  assert.match(f.sent[0][3],/审核未通过/);
+  assert.match(f.sent[0][3],/日志显示存在有效输出/);
+  assert.match(f.sent[0][3],/原消费已有退款/);
 });
 test('不同用户分开发送，没有通知邮箱及无效设置明确跳过',async t=>{
   const f=setup(t,{upstream:{target:async id=>({email:'account@example.com',setting:id===7?'{}':JSON.stringify({notification_email:'other@example.com'})})}});

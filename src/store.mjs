@@ -32,6 +32,7 @@ export class Store {
       this.db.exec(`ALTER TABLE claims ADD COLUMN reserved_at INTEGER;
         UPDATE claims SET reserved_at=COALESCE((SELECT MAX(created_at) FROM events WHERE claim_id=claims.id AND action='execution_reserved'),updated_at) WHERE execution_day IS NOT NULL`);
     }
+    if(!this.db.prepare('PRAGMA table_info(ai_reviews)').all().some(c=>c.name==='analysis'))this.db.exec('ALTER TABLE ai_reviews ADD COLUMN analysis TEXT');
     this.db.exec('CREATE INDEX IF NOT EXISTS claims_run ON claims(user_id,run_id)');
     if (!this.db.prepare('PRAGMA table_info(notifications)').all().some(c => c.name === 'dedupe_key')) {
       this.db.exec('ALTER TABLE notifications ADD COLUMN dedupe_key TEXT');
@@ -39,6 +40,17 @@ export class Store {
     this.db.exec('CREATE INDEX IF NOT EXISTS notifications_dedupe ON notifications(dedupe_key,status,created_at)');
     this.db.exec('PRAGMA user_version=3');
     this.db.prepare('INSERT OR IGNORE INTO settings VALUES(1,?)').run(JSON.stringify(defaults));
+    if(!this.db.prepare("SELECT 1 FROM metadata WHERE key='email_rejected_event_migrated'").get()){
+      this.transaction(()=>{
+        const saved=JSON.parse(this.db.prepare('SELECT value FROM settings WHERE id=1').get().value);
+        const email={...defaults.emailNotifications,...saved.emailNotifications};
+        if(!email.events.includes('rejected')){
+          email.events=[...email.events,'rejected'];
+          this.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify({...saved,emailNotifications:email,version:Number(saved.version||1)+1}));
+        }
+        this.db.prepare("INSERT INTO metadata(key,value) VALUES('email_rejected_event_migrated','1')").run();
+      });
+    }
     // A process may have died after the remote transfer: never replay it.
     this.db.prepare("UPDATE claims SET status='unknown', updated_at=? WHERE status='executing'").run(Date.now());
   }
@@ -177,11 +189,11 @@ export class Store {
   }
   aiReview(requestId, fingerprint, promptVersion) {
     const row = this.db.prepare('SELECT * FROM ai_reviews WHERE request_id=? AND log_fingerprint=? AND prompt_version=?').get(requestId, fingerprint, promptVersion);
-    return row ? { ...row, evidence: JSON.parse(row.evidence) } : null;
+    return row ? { ...row, evidence: JSON.parse(row.evidence),analysis:row.analysis?JSON.parse(row.analysis):null } : null;
   }
   latestAIReview(requestId, fingerprint) {
     const row=this.db.prepare('SELECT * FROM ai_reviews WHERE request_id=? AND log_fingerprint=? ORDER BY created_at DESC,rowid DESC LIMIT 1').get(requestId,fingerprint);
-    return row?{...row,evidence:JSON.parse(row.evidence)}:null;
+    return row?{...row,evidence:JSON.parse(row.evidence),analysis:row.analysis?JSON.parse(row.analysis):null}:null;
   }
   aiReviewCount(day, userId) {
     const start = Date.parse(day + 'T00:00:00.000Z'), end = start + 86400000;
@@ -193,8 +205,8 @@ export class Store {
       const existing = this.aiReview(input.requestId, input.fingerprint, input.promptVersion);
       if (existing) return existing;
       const id = randomUUID();
-      this.db.prepare('INSERT INTO ai_reviews(id,request_id,user_id,log_fingerprint,prompt_version,decision,confidence,reason,evidence,raw_response,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
-        .run(id, input.requestId, input.userId, input.fingerprint, input.promptVersion, input.decision, input.confidence, input.reason, JSON.stringify(input.evidence || []), input.rawResponse, input.status, now, now);
+      this.db.prepare('INSERT INTO ai_reviews(id,request_id,user_id,log_fingerprint,prompt_version,decision,confidence,reason,evidence,raw_response,status,created_at,updated_at,analysis) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id, input.requestId, input.userId, input.fingerprint, input.promptVersion, input.decision, input.confidence, input.reason, JSON.stringify(input.evidence || []), input.rawResponse, input.status, now, now,input.analysis?JSON.stringify(input.analysis):null);
       return this.aiReview(input.requestId, input.fingerprint, input.promptVersion);
     });
   }

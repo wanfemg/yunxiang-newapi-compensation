@@ -26,9 +26,10 @@ export class Compensation {
   view(c, admin = false) {
     if (admin) {
       const fingerprint=logFingerprint(c.log),version=this.ai.promptVersion?.()||'empty-v1';
+      const adminReview=this.ai.promptVersion?this.store.aiReview(c.request_id,fingerprint,this.ai.promptVersion('admin')):null;
       const current=this.store.aiReview(c.request_id,fingerprint,version);
-      const aiReview=current||this.store.latestAIReview(c.request_id,fingerprint);
-      return {...c,fundingSource:fundingSource(c.log),compensationLabel:compensationLabel(c.log,c.source),expectedAmount:expectedQuota(c.log,c.rules),aiReview,aiReviewIsCurrent:Boolean(current)};
+      const aiReview=adminReview||current||this.store.latestAIReview(c.request_id,fingerprint);
+      return {...c,fundingSource:fundingSource(c.log),compensationLabel:compensationLabel(c.log,c.source),expectedAmount:expectedQuota(c.log,c.rules),aiReview,aiReviewIsCurrent:Boolean(adminReview||current),aiReviewMode:adminReview?'admin':current?'automatic':'historical'};
     }
     const { rules, log, operator_id, attempt_id, verification_note, confirmed_unreturned, ...safe } = c;
     return { ...safe, log: publicLog(log), fundingSource:fundingSource(log),compensationLabel:compensationLabel(log,c.source),ruleVersion: rules.version,expectedAmount:expectedQuota(log,rules) };
@@ -99,10 +100,24 @@ export class Compensation {
     if(!rules.aiEnabled)throw new AppError('AI 辅助审核已关闭，请先在 AI 设置中开启',409);
     if(!['pending','approved'].includes(claim.status))throw new AppError('当前申请状态不支持 AI 辅助审核',409);
     if(!this.ai.configured())throw new AppError('请先保存 AI API 地址、密钥和模型',400);
-    const result=await this.ai.review(claim.log,rules);
+    const previousReview=this.store.aiReview(claim.request_id,logFingerprint(claim.log),this.ai.promptVersion?.()||'empty-v1');
+    const result=await this.ai.review(claim.log,rules,{mode:'admin',previousReview});
     const recorded=this.store.db.prepare("SELECT 1 FROM events WHERE claim_id=? AND action='admin_ai_reviewed' AND json_extract(detail,'$.reviewId')=?").get(id,result.id);
     if(!recorded)this.store.event(id,user.id,'admin_ai_reviewed',{reviewId:result.id,decision:result.decision,confidence:result.confidence,promptVersion:result.prompt_version,status:result.status});
     return this.view(this.store.get(id),true);
+  }
+  async approveWithAI(user,id){
+    this.requireAdmin(user);
+    const claim=this.claimFor(user,id),rules=this.store.rules();
+    if(claim.status!=='pending')throw new AppError('仅待审核申请可采纳 AI 建议并补额度',409);
+    if(fundingSource(claim.log)==='subscription')throw new AppError('订阅申请须逐笔核实未退款金额，请使用原审核流程');
+    if(!this.ai.promptVersion)throw new AppError('AI 复核版本不可用，请重新执行 AI 辅助审核',409);
+    const review=this.store.aiReview(claim.request_id,logFingerprint(claim.log),this.ai.promptVersion('admin'));
+    if(!review||review.status!=='completed')throw new AppError('请先完成 AI 二次复核，再采纳审核建议',409);
+    if(review.analysis?.recommendation!=='approve'||review.decision!=='empty'||review.confidence*100<rules.aiAutoThreshold)throw new AppError('AI 建议不是高置信度通过，须由管理员按常规流程处理',409);
+    const note=`管理员采纳 AI 二次复核建议并确认补偿：${review.analysis.summary}；${review.reason}`;
+    this.store.transition(id,['pending'],'approved',user.id,note);
+    return this.#execute(user,id,expectedQuota(claim.log,claim.rules),note);
   }
   async approveSubscription(user,id,verifiedAmount,note){
     this.requireAdmin(user);const claim=this.claimFor(user,id);

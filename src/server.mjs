@@ -42,7 +42,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
   async function queueEmails(claims,actor){
     if(!emailNotifications)return;
     try{
-      for(const event of ['approved','succeeded','failed','unknown'])await emailNotifications.notifyClaims(event,claims.filter(c=>c.status===event),upstream);
+      for(const event of ['approved','rejected','succeeded','failed','unknown'])await emailNotifications.notifyClaims(event,claims.filter(c=>c.status===event),upstream);
     }catch{
       try{store.event(null,actor,'email_notification_enqueue_failed',{claimIds:claims.map(c=>c.id)});}catch{console.error('Email notification enqueue failed');}
     }
@@ -217,6 +217,13 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       }
       const assist=base.match(/^\/api\/claims\/([a-f0-9-]{36})\/ai-review$/);
       if(admin&&assist&&req.method==='POST')return send(await service.assistReview(user,assist[1]));
+      const aiApprove=base.match(/^\/api\/claims\/([a-f0-9-]{36})\/ai-approve$/);
+      if(admin&&aiApprove&&req.method==='POST'){
+        const result=await service.approveWithAI(user,aiApprove[1]);
+        if(result.run_id)store.notifyClaimsBatch(result.run_id);
+        await queueEmails([result],user.id);
+        return send(service.view(result,true));
+      }
       const detail = base.match(/^\/api\/claims\/([a-f0-9-]{36})$/);
       if (detail && req.method === 'GET') {
         const c = service.claimFor(user, detail[1]);

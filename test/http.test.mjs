@@ -36,7 +36,7 @@ test('AI 配置经真实 HTTP 拉取模型并验证所选模型推理，空回�
     res.setHeader('Content-Type','application/json');
     if(mode==='unauthorized'){res.statusCode=401;res.end(JSON.stringify({error:{message:'invalid fixture-ai-key'}}));return;}
     if(req.url==='/v1/models'){res.end(JSON.stringify({success:true,object:'list',data:[{id:'chat-model'}]}));return;}
-    if(req.url==='/v1/chat/completions'){const body=JSON.parse(text);res.end(JSON.stringify({choices:[{message:{content:mode==='empty'?'':body.messages[0].role==='system'?'{"decision":"uncertain","confidence":0.5,"reason":"需要人工核验","evidence":["缺少原始输出"]}':'OK'}}]}));return;}
+    if(req.url==='/v1/chat/completions'){const body=JSON.parse(text);const content=mode==='empty'?'':body.messages[0].content.includes('二次复核')?'{"decision":"empty","confidence":0.98,"recommendation":"approve","summary":"日志与规则一致","reason":"输出 token 为零","evidence":["completion_tokens=0"]}':body.messages[0].role==='system'?'{"decision":"uncertain","confidence":0.5,"reason":"需要人工核验","evidence":["缺少原始输出"]}':'OK';res.end(JSON.stringify({choices:[{message:{content}}]}));return;}
     res.statusCode=404;res.end('{}');
   });
   ai.listen(0,'127.0.0.1');await once(ai,'listening');
@@ -70,10 +70,18 @@ test('AI 配置经真实 HTTP 拉取模型并验证所选模型推理，空回�
   assert.equal((await f.request('/api/admin/claims/'+c.id+'/ai-review',{...u,method:'POST',body:{}})).status,403);
   const before=calls.length;
   const assisted=await f.request('/api/admin/claims/'+c.id+'/ai-review',{...a,method:'POST',body:{}});
-  assert.equal(assisted.status,200);assert.equal(assisted.json.data.aiReview.reason,'需要人工核验');
+  assert.equal(assisted.status,200);assert.equal(assisted.json.data.aiReview.reason,'输出 token 为零');
   assert.equal(assisted.json.data.status,'pending');assert.equal(f.remote.data.credits.length,0);
   await f.request('/api/admin/claims/'+c.id+'/ai-review',{...a,method:'POST',body:{}});
   assert.equal(calls.length,before+1);
+  mode='ok';f.remote.data.logs.push(log('ai-approve'));
+  const ready=f.store.create(log('ai-approve'),user,f.store.rules(),'管理员复核通过','self',7);
+  assert.equal((await f.request('/api/admin/claims/'+ready.id+'/ai-review',{...u,method:'POST',body:{}})).status,403);
+  const secondReview=await f.request('/api/admin/claims/'+ready.id+'/ai-review',{...a,method:'POST',body:{}});
+  assert.equal(secondReview.json.data.aiReview.analysis.recommendation,'approve');
+  const aiApproval=await f.request('/api/admin/claims/'+ready.id+'/ai-approve',{...a,method:'POST',body:{}});
+  assert.equal(aiApproval.status,200);assert.equal(aiApproval.json.data.status,'succeeded');assert.equal(f.remote.data.credits.length,1);
+  assert.equal((await f.request('/api/admin/claims/'+ready.id+'/ai-approve',{...a,method:'POST',body:{}})).status,409);
   assert.equal((await f.request('/api/admin/ai-settings',{...u,method:'PUT',body:{aiEnabled:false,rulesVersion:f.store.rules().version}})).status,403);
   assert.equal((await f.request('/api/admin/ai-settings',{...a,method:'PUT',body:{aiEnabled:false,rulesVersion:f.store.rules().version}})).status,200);
   assert.equal((await f.request('/api/admin/ai-config',a)).json.data.aiEnabled,false);

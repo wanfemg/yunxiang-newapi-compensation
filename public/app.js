@@ -214,13 +214,19 @@ async function detail(id){
   const admin=s.user.role>=10&&['adminOverview','adminClaims','adminLogs','stats'].includes(s.page),[c,display]=await Promise.all([api((admin?'/api/admin':'/api')+'/claims/'+id),api('/api/display')]);s.display=display;let actions=[];
   if(admin)actions=c.status==='pending'?[['approve',c.fundingSource==='subscription'?'审核通过并补入余额':'审核通过'],['reject','驳回申请']]:c.status==='approved'?[['execute','核验并执行返还']]:c.status==='unknown'?[['received','核对：已到账'],['not_received','核对：未到账']]:['failed','rejected'].includes(c.status)?[['reopen','补充依据并重新审核']]:[];
   const eventLabels={application_created:'提交补偿申请',ai_review_started:'开始 AI 空回审查',ai_reviewed:'AI 空回判定',admin_ai_reviewed:'管理员 AI 辅助审核',self_service_routed:'自动核验分流',execution_reserved:'锁定本笔返还额度',...statuses};
-  const ai=c.aiReview;
+  const ai=c.aiReview,aiReviewMode=c.aiReviewMode;
+  const aiAnalysis=ai?.analysis;
+  const recommendationLabel={approve:'建议通过并补额度',reject:'建议驳回申请',manual:'建议转人工核实'}[aiAnalysis?.recommendation]||'建议不明确，按人工流程处理';
   $('#detail-body').innerHTML=(admin&&s.page==='adminClaims'&&claimGroup?'<button class="ghost group-back" data-owner="'+c.user_id+'">'+icon('arrow-left')+'返回用户申请</button>':'')+'<div class="detail-status">'+badge(c.status)+'<span>'+esc(c.id)+'</span></div><div class="detail-amounts"><div><small>原消费</small><strong>'+money(c.log.quota)+'</strong></div><div><small>预计补偿</small><strong>'+money(c.expectedAmount)+'</strong></div><div><small>实际补偿</small><strong class="amount">'+money(c.amount)+'</strong></div></div><div class="notice compensation-banner">'+esc(compensationLabel(c))+' · 本记录属于空回补偿流水</div>'+(ai?'<div class="notice '+(ai.decision==='empty'?'success':'warning')+'">AI 判定：'+esc(ai.decision==='empty'?'疑似空回':ai.decision==='not_empty'?'非空回':'无法确定')+' · 置信度 '+Math.round(ai.confidence*100)+'%<br>'+esc(ai.reason)+(ai.evidence?.length?'<br>依据：'+esc(ai.evidence.join('；')):'')+'</div>':'')+(c.fundingSource==='subscription'?'<div class="notice warning">订阅消费由站长审批并核实金额，审核通过后补入钱包余额，不恢复订阅额度。仅原站确认成功才标记到账。</div>':'')+'<div class="detail-facts">'+lines([['补偿类型',compensationLabel(c)],['原请求',c.request_id],['模型',c.log.model_name],['资金来源',fundingLabel(c.fundingSource)],['申请理由',c.reason],['处理说明',c.review_note||'尚未处理'],['申请时间',date(c.created_at)],['更新时间',date(c.updated_at)]])+'</div><div class="action-row">'+actions.map(([a,t])=>'<button class="secondary" data-action="'+a+'" data-id="'+id+'">'+t+'</button>').join('')+'</div><h3 class="detail-section-title">处理时间线</h3><ol class="claim-timeline">'+c.events.map(e=>'<li><strong>'+esc(eventLabels[e.action]||e.action)+'</strong><span>'+date(e.created_at)+(admin?' · 操作人 #'+esc(e.actor_id):'')+'</span></li>').join('')+'</ol>'+(admin?renderSnapshot({log:c.log,rules:c.rules,verification_note:c.verification_note,attempt_id:c.attempt_id},{formatQuota:money}):'');
   if(admin)$('#detail-body').insertAdjacentHTML('afterbegin','<div class="detail-account">'+icon('user-round')+'<div><strong>'+esc(c.username)+'</strong><span class="sub">原站用户 ID '+c.user_id+' · '+esc(c.source==='manual'?'人工申请':'用户自助申请')+'</span></div></div>');
   if(admin){
     const enabled=Boolean(s.rules?.aiEnabled);
     const historical=ai&&!c.aiReviewIsCurrent;
-    $('#detail-body .detail-facts').insertAdjacentHTML('beforebegin','<section class="admin-ai-assist"><div class="ai-assist-heading"><h3>AI 辅助审核</h3>'+(enabled&&['pending','approved'].includes(c.status)?'<button type="button" class="secondary" data-ai-assist="'+esc(id)+'">'+icon('sparkles')+(c.aiReviewIsCurrent?'查看已有 AI 依据':historical?'按当前提示词分析':'AI 辅助分析')+'</button>':'')+'</div><p class="field-help">'+(historical?'上方为历史提示词的分析结果，已保留审核依据。':enabled?'AI 综合申请日志与补偿规则给出依据；审核与额度发放由管理员确认。':'AI 辅助审核未开启，在补偿规则设置中开启并保存后使用。')+'</p><p data-ai-assist-feedback class="field-help" role="status"></p></section>');
+    const canAccept=enabled&&c.status==='pending'&&c.aiReviewIsCurrent&&ai?.status==='completed'&&aiAnalysis?.recommendation==='approve'&&ai.decision==='empty'&&ai.confidence*100>=s.rules.aiAutoThreshold&&c.fundingSource!=='subscription';
+    const detail=ai?'<div class="ai-review-result"><strong>'+esc(aiReviewMode==='admin'?'二次复核 · ':'初始判定 · ')+esc(recommendationLabel)+' · '+Math.round(ai.confidence*100)+'%</strong>'+(aiAnalysis?.summary?'<p><b>综合判断：</b>'+esc(aiAnalysis.summary)+'</p>':'')+'<p><b>判断原因：</b>'+esc(ai.reason)+'</p>'+(ai.evidence?.length?'<p><b>判断依据：</b>'+esc(ai.evidence.join('；'))+'</p>':'')+(aiReviewMode!=='admin'&&ai.status==='completed'?'<p>点击 AI 辅助分析进行独立二次复核。</p>':'')+'</div>':'';
+    const accept=canAccept?'<button type="button" class="primary" data-ai-approve="'+esc(id)+'">'+icon('check')+'采纳建议并通过补额度</button>':'';
+    const subscriptionHint=enabled&&c.status==='pending'&&c.fundingSource==='subscription'?'<p class="field-help">订阅消费需逐笔核实未退款金额，保留原审批与金额确认流程。</p>':'';
+    $('#detail-body .detail-facts').insertAdjacentHTML('beforebegin','<section class="admin-ai-assist"><div class="ai-assist-heading"><h3>AI 辅助审核</h3><div>'+(enabled&&['pending','approved'].includes(c.status)?'<button type="button" class="secondary" data-ai-assist="'+esc(id)+'">'+icon('sparkles')+(aiReviewMode==='admin'&&c.aiReviewIsCurrent?'查看当前复核':historical?'按当前提示词复核':'AI 二次复核')+'</button>':'')+accept+'</div></div>'+detail+'<p class="field-help">'+(historical?'上方为旧提示词版本的分析结果，已保留审核依据。':enabled?'AI 独立复核日志、补偿规则和初始判定，给出综合建议；仅管理员明确采纳后才会执行补偿。':'AI 辅助审核未开启，在补偿规则设置中开启并保存后使用。')+'</p>'+subscriptionHint+'<p data-ai-assist-feedback class="field-help" role="status"></p></section>');
   }
   bindSnapshot($('#detail-body'));icons();if(!$('#detail-dialog').open)$('#detail-dialog').showModal();
 }
@@ -422,6 +428,18 @@ document.addEventListener('click',async event=>{const b=event.target.closest('bu
       await detail(b.dataset.aiAssist);
       const current=$('[data-ai-assist-feedback]');
       if(current){current.className=result.aiReview?.status==='completed'?'field-help success-text':'field-help error';current.textContent=result.aiReview?.status==='completed'?'AI 依据已更新，申请状态和额度未改变。':'AI 未完成有效判定，请根据上方原因继续人工审核。';}
+    }catch(error){feedback.className='field-help error';feedback.textContent=error.message;throw error;}
+    finally{b.disabled=false;}
+    return;
+  }
+  if(b.dataset.aiApprove){
+    s.busy=true;b.disabled=true;
+    const feedback=$('[data-ai-assist-feedback]');feedback.className='field-help';feedback.textContent='正在执行 AI 建议复核、原消费核验与额度补偿…';
+    try{
+      const result=await api('/api/admin/claims/'+b.dataset.aiApprove+'/ai-approve','POST',{});
+      await detail(b.dataset.aiApprove);
+      const current=$('[data-ai-assist-feedback]');
+      if(current){current.className=result.status==='succeeded'?'field-help success-text':'field-help error';current.textContent=result.status==='succeeded'?'已采纳 AI 建议，补偿成功。':result.status==='unknown'?'已采纳 AI 建议，但原站到账结果待核对；不要重复提交。':'已采纳 AI 建议，当前状态：'+(statuses[result.status]||result.status)+'。';}
     }catch(error){feedback.className='field-help error';feedback.textContent=error.message;throw error;}
     finally{b.disabled=false;}
     return;

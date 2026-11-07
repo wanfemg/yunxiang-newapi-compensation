@@ -48,6 +48,50 @@ test('管理员主动 AI 辅助审核仅提供依据，并发和重复点击只�
   await assert.rejects(()=>f.service.assistReview(admin,c.id),/关闭|开启/);
 });
 
+test('管理员二次 AI 复核综合原判定并给出明确建议，一键通过补额度仅在建议通过时执行',async t=>{
+  const f=fixture({rules:{aiEnabled:true,executionEnabled:true}});
+  t.after(()=>f.store.close());
+  f.store.saveAIConfig({baseUrl:'https://ai.example/v1',apiKey:'fixture-key',model:'model'},1);
+  let calls=0;
+  f.service.ai=new AIReviewer({store:f.store,env:{},fetcher:async(url,options)=>{
+    calls++;const body=JSON.parse(options.body);
+    assert.match(body.messages[0].content,/二次复核/);
+    assert.match(body.messages[1].content,/previousReview/);
+    return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({decision:'empty',confidence:.98,recommendation:'approve',summary:'日志与规则一致，具备补偿条件。',reason:'输出 token 为零且无退款记录。',evidence:['completion_tokens=0','原消费存在']})}}]}));
+  }});
+  const c=await f.service.apply(user,'fixture-request-1','人工审核');
+  const view=await f.service.assistReview(admin,c.id);
+  assert.equal(view.aiReview.analysis.recommendation,'approve');
+  assert.equal(view.aiReview.analysis.summary,'日志与规则一致，具备补偿条件。');
+  assert.deepEqual(view.aiReview.evidence,['completion_tokens=0','原消费存在']);
+  const result=await f.service.approveWithAI(admin,c.id);
+  assert.equal(result.status,'succeeded');
+  assert.equal(f.calls(),1);
+  assert.equal(calls,1);
+  await assert.rejects(()=>f.service.approveWithAI(admin,c.id),/待审核|建议|状态/);
+});
+
+test('AI 建议转人工或不通过时禁止一键补额度，订阅申请保留核实金额流程',async t=>{
+  const f=fixture({rules:{aiEnabled:true,executionEnabled:true}});
+  t.after(()=>f.store.close());
+  f.store.saveAIConfig({baseUrl:'https://ai.example/v1',apiKey:'fixture-key',model:'model'},1);
+  let content=JSON.stringify({decision:'uncertain',confidence:.99,recommendation:'manual',summary:'证据不足',reason:'需核对历史退款',evidence:['账单缺少字段']});
+  f.service.ai=new AIReviewer({store:f.store,env:{},fetcher:async()=>new Response(JSON.stringify({choices:[{message:{content}}]}))});
+  const c=await f.service.apply(user,'fixture-request-1','人工审核');
+  await f.service.assistReview(admin,c.id);
+  await assert.rejects(()=>f.service.approveWithAI(admin,c.id),/建议|人工|通过/);
+  assert.equal(f.store.get(c.id).status,'pending');
+  content=JSON.stringify({decision:'empty',confidence:.99,recommendation:'approve',summary:'可补偿',reason:'证据充分',evidence:['输出为零']});
+  const subscriptionLog=structuredClone(f.store.get(c.id).log);
+  subscriptionLog.request_id='subscription-request';
+  subscriptionLog.other=JSON.stringify({billing_source:'subscription',subscription_id:1});
+  f.logs.push(subscriptionLog);
+  const subscription=await f.service.apply(user,'subscription-request','人工审核');
+  await f.service.assistReview(admin,subscription.id);
+  await assert.rejects(()=>f.service.approveWithAI(admin,subscription.id),/订阅|核实金额/);
+  assert.equal(f.store.get(subscription.id).status,'pending');
+});
+
 test('修改提示词后管理员仍能看到历史 AI 依据，并标识为旧版本',async t=>{
   const f=fixture({rules:{aiEnabled:true}});
   t.after(()=>f.store.close());

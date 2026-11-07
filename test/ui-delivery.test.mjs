@@ -50,3 +50,17 @@ test('通知入队故障不改变成功的审核响应与申请状态',async t=>
   assert.equal(response.status,200);assert.equal(data.data[0].status,'approved');assert.equal(f.store.get(id).status,'approved');
   assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE action='email_notification_enqueue_failed'").get().n,1);
 });
+test('站长驳回申请后入队包含审核未通过事件与驳回意见',async t=>{
+  const f=await setup(t),u=await f.login(user),a=await f.login(admin);
+  f.remote.data.logs[0].other='{}';
+  f.remote.upstream.target=async()=>({id:7,setting:{notification_email:'notify@example.com'}});
+  const config={host:'smtp.example.com',port:587,security:'starttls',username:'sender',password:'private-mail-secret',fromEmail:'sender@example.com',fromName:'云响',enabled:true,events:['rejected']};
+  assert.equal((await f.request('/api/admin/email-notifications',a,'PUT',config)).status,200);
+  const created=await (await f.request('/api/claims',u,'POST',{requestIds:['fixture-request-1'],reason:'人工核验'})).json(),id=created.data[0].claim.id;
+  const response=await f.request('/api/admin/actions',a,'POST',{action:'reject',items:[{id}],note:'消费日志确认存在有效输出'});
+  assert.equal(response.status,200);
+  assert.equal(f.store.get(id).status,'rejected');
+  assert.equal(f.store.db.prepare("SELECT event FROM email_notifications").get().event,'rejected');
+  await f.mail.flush();
+  assert.match(f.sent[0][3],/消费日志确认存在有效输出/);
+});

@@ -5,8 +5,8 @@ import nodemailer from 'nodemailer';
 import {AppError,expectedQuota,validateRules} from './rules.mjs';
 import {formatQuota} from '../public/display.js';
 
-const subjects={approved:'你的空回补偿申请已审核通过',succeeded:'你的空回补偿已处理完成',failed:'你的空回补偿处理失败',unknown:'你的空回补偿结果待确认'};
-const labels={approved:'审核通过，等待额度补偿',succeeded:'补偿成功',failed:'补偿失败',unknown:'结果待确认'};
+const subjects={approved:'你的空回补偿申请已审核通过',rejected:'你的空回补偿申请审核未通过',succeeded:'你的空回补偿已处理完成',failed:'你的空回补偿处理失败',unknown:'你的空回补偿结果待确认'};
+const labels={approved:'审核通过，等待额度补偿',rejected:'审核未通过',succeeded:'补偿成功',failed:'补偿失败',unknown:'结果待确认'};
 const emailAddress=value=>typeof value==='string'&&value.length<=254&&/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value);
 function encrypt(key,value){
   const iv=randomBytes(12),cipher=createCipheriv('aes-256-gcm',key,iv),data=Buffer.concat([cipher.update(String(value)),cipher.final()]);
@@ -67,8 +67,8 @@ export class EmailNotifications{
       let display;try{display=JSON.parse(this.store.db.prepare("SELECT value FROM metadata WHERE key='display'").get()?.value);}catch{}
       const money=value=>display?formatQuota(value,display):`${value} 原始额度单位`;
       const actual=event==='succeeded'?items.reduce((sum,c)=>sum+c.amount,0):0;
-      const summary=event==='approved'?'管理员已完成审核，申请已通过，等待额度补偿执行。':event==='succeeded'?`已确认补回额度：${money(actual)}`:event==='failed'?'补偿未成功，请登录工作台查看失败原因与处理进度。':'补偿结果尚未确认，管理员正在核对，请勿重复申请。';
-      const lines=items.map((c,index)=>`${index+1}. ${c.log.model_name}\n   请求标识：${c.request_id}\n   原消费额度：${money(c.log.quota)}\n   ${event==='approved'?'预计补偿额度':'已确认补回额度'}：${money(event==='approved'?expectedQuota(c.log,c.rules):event==='succeeded'?c.amount:0)}\n   状态：${labels[event]}`).join('\n\n');
+      const summary=event==='approved'?'管理员已完成审核，申请已通过，等待额度补偿执行。':event==='rejected'?'管理员审核后未通过本次申请，具体原因见下方逐笔审核意见。':event==='succeeded'?`已确认补回额度：${money(actual)}`:event==='failed'?'补偿未成功，请登录工作台查看失败原因与处理进度。':'补偿结果尚未确认，管理员正在核对，请勿重复申请。';
+      const lines=items.map((c,index)=>`${index+1}. ${c.log.model_name}\n   请求标识：${c.request_id}\n   原消费额度：${money(c.log.quota)}\n   ${event==='approved'?'预计补偿额度':event==='succeeded'?'已确认补回额度':'预计补偿额度'}：${money(event==='approved'||event==='rejected'?expectedQuota(c.log,c.rules):event==='succeeded'?c.amount:0)}\n   状态：${labels[event]}${c.review_note?`\n   ${event==='rejected'?'审核未通过原因':'处理说明'}：${c.review_note}`:''}`).join('\n\n');
       const text=`你好，${items[0].username}：\n\n${summary}\n\n申请数量：${items.length} 笔\n涉及模型：${new Set(items.map(c=>c.log.model_name)).size} 个\n\n申请明细：\n\n${lines}\n\n处理时间：${new Date().toLocaleString('zh-CN',{timeZone:rules.timezone,hour12:false})}\n\n登录云响补空回工作台查看处理进度。实际到账以 云中猫API小站 账户余额和补偿记录为准。\n\n云响补空回系统`;
       const now=Date.now(),body=JSON.stringify({userId,subject:'【云响补空回】'+subjects[event],text});
       const inserted=this.store.db.prepare('INSERT INTO email_notifications(event,body,next_at,created_at) VALUES(?,?,?,?)').run(event,body,now,now);

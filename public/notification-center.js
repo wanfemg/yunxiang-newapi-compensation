@@ -1,5 +1,5 @@
 export function notificationCenter({n,r,e,esc,panel,table,empty,money,date,icon,eventNames,tab}){
-  const emailEvents={approved:'审核通过',succeeded:'补偿成功',failed:'补偿失败',unknown:'结果待确认'};
+  const emailEvents={approved:'审核通过',rejected:'审核未通过',succeeded:'补偿成功',failed:'补偿失败',unknown:'结果待确认'};
   const statusNames={pending:'等待发送',sending:'发送中',sent:'已发送',skipped:'已跳过',failed:'发送失败',cancelled:'已取消'};
   const state=value=>'<span class="badge '+(value==='sent'?'good':value==='failed'?'bad':'neutral')+'">'+esc(statusNames[value]||value)+'</span>';
   const events=(items,selected)=>Object.entries(items).map(([key,label])=>'<label class="check-label"><input name="events" type="checkbox" value="'+key+'" '+(selected.includes(key)?'checked':'')+'>'+esc(label)+'</label>').join('');
@@ -13,6 +13,6 @@ export function notificationCenter({n,r,e,esc,panel,table,empty,money,date,icon,
   return summary+tabs+'<section id="notify-panel-ding" role="tabpanel" aria-labelledby="notify-tab-ding" '+(tab!=='ding'?'hidden':'')+'>'+ding+'</section><section id="notify-panel-email" role="tabpanel" aria-labelledby="notify-tab-email" '+(tab!=='email'?'hidden':'')+'>'+email+'</section>';
 }
 export function emailPreview(event,money,esc){
-  const text={approved:['你的空回补偿申请已审核通过','申请已通过，等待额度补偿执行。','预计补偿'],succeeded:['你的空回补偿已处理完成','两笔申请已确认补偿成功。','已确认补回'],failed:['你的空回补偿处理失败','未完成额度补偿，登录工作台查看失败原因与处理进度。','已确认补回'],unknown:['你的空回补偿结果待确认','管理员正在核对到账结果，请勿重复申请。','已确认补回']}[event];
+  const text={approved:['你的空回补偿申请已审核通过','申请已通过，等待额度补偿执行。','预计补偿'],rejected:['你的空回补偿申请审核未通过','管理员审核后未通过申请，具体原因请查看下方审核意见。','预计补偿'],succeeded:['你的空回补偿已处理完成','两笔申请已确认补偿成功。','已确认补回'],failed:['你的空回补偿处理失败','未完成额度补偿，登录工作台查看失败原因与处理进度。','已确认补回'],unknown:['你的空回补偿结果待确认','管理员正在核对到账结果，请勿重复申请。','已确认补回']}[event];
   return '<strong>【云响补空回】'+text[0]+'</strong><p>你好，示例用户：</p><p>'+text[1]+'</p><p>申请数量：2 笔 · 涉及模型：2 个</p><p>模型 A · '+text[2]+'：'+esc(money(['failed','unknown'].includes(event)?0:300))+'</p><p>模型 B · '+text[2]+'：'+esc(money(['failed','unknown'].includes(event)?0:200))+'</p><p>实际到账以 云中猫API小站 账户余额和补偿记录为准。</p>';
 }

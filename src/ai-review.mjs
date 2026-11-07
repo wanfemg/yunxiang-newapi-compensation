@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto';
 import { AppError } from './rules.mjs';
 
 const decisionSet = new Set(['empty', 'not_empty', 'uncertain']);
+const recommendationSet = new Set(['approve','reject','manual']);
 const safe = (value, max = 4000) => String(value ?? '').slice(0, max);
 const DEFAULT_PROMPT = '你是额度补偿审核助手。只根据提供的日志和规则判断是否疑似空回，不决定金额，不执行任何操作。必须只返回 JSON：{"decision":"empty|not_empty|uncertain","confidence":0到1,"reason":"简短中文理由","evidence":["证据"]}。证据不足必须返回 uncertain。';
+const ADMIN_PROMPT = '\n\n当前任务是站长的二次复核：独立核对消费日志、补偿规则和 previousReview 中的初审结论，指出初审是否与事实一致，不得把初审结论当作事实。综合评估证据是否足以通过申请，说明仍需人工核查的风险。只返回 JSON：{"decision":"empty|not_empty|uncertain","confidence":0到1,"recommendation":"approve|reject|manual","summary":"综合判断","reason":"判断原因","evidence":["逐条可核对的依据"]}。仅当日志和规则均支持空回、证据充分且无明显风险时 recommendation 才可为 approve；明确不符合规则时为 reject；证据不足、矛盾或结果不确定时为 manual。不得决定金额，不得执行操作。';
 
 export function normalizeAIBaseURL(value) {
   let url;
@@ -28,9 +30,10 @@ export class AIReviewer {
     const c = this.config();
     return Boolean(c.baseUrl && c.apiKey && c.model);
   }
-  promptVersion() {
+  promptVersion(mode='automatic') {
     const custom = String(this.store?.aiConfig?.(this.env).prompt ?? this.env.AI_PROMPT ?? '').trim();
-    return String(this.env.AI_PROMPT_VERSION || (custom ? createHash('sha256').update(this.config().prompt).digest('hex').slice(0,16) : 'empty-v1'));
+    const version=String(this.env.AI_PROMPT_VERSION || (custom ? createHash('sha256').update(this.config().prompt).digest('hex').slice(0,16) : 'empty-v1'));
+    return mode==='admin'?version+'-admin-assist-v1':version;
   }
   config() {
     const stored = this.store?.aiConfig?.(this.env) || {};
@@ -116,16 +119,17 @@ export class AIReviewer {
     const reply = await this.chat([{role: 'user', content: '这是一条连接测试消息，请只回复 OK。'}], {}, c);
     return {ok: true, model: c.model, status: 200, elapsedMs: Math.max(0, this.now() - started), reply: this.redact(reply, c)};
   }
-  async review(log, rules) {
-    const key=JSON.stringify([log.request_id,logFingerprint(log),this.promptVersion()]);
+  async review(log, rules, options={}) {
+    const mode=options.mode==='admin'?'admin':'automatic';
+    const key=JSON.stringify([log.request_id,logFingerprint(log),this.promptVersion(mode)]);
     const existing=this.inflight.get(key);
     if(existing)return existing.promise;
-    const promise=this.runReview(log,rules);
+    const promise=this.runReview(log,rules,{...options,mode});
     this.inflight.set(key,{promise,userId:log.user_id,day:new Date(this.now()).toISOString().slice(0,10)});
     try{return await promise;}finally{this.inflight.delete(key);}
   }
-  async runReview(log, rules) {
-    const promptVersion = this.promptVersion();
+  async runReview(log, rules,{mode='automatic',previousReview=null}={}) {
+    const promptVersion = this.promptVersion(mode);
     const fingerprint = logFingerprint(log);
     const existing = this.store.aiReview(log.request_id, fingerprint, promptVersion);
     if (existing) return existing;
@@ -142,8 +146,8 @@ export class AIReviewer {
       temperature: 0,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: config.prompt },
-        { role: 'user', content: JSON.stringify({ log: { request_id: log.request_id, user_id: log.user_id, model_name: log.model_name, channel: log.channel, quota: log.quota, prompt_tokens: log.prompt_tokens, completion_tokens: log.completion_tokens, is_stream: log.is_stream, created_at: log.created_at, other: safe(log.other) }, rules: { refundBasisPoints: rules.refundBasisPoints, selfServiceMaxQuota: rules.selfServiceMaxQuota, selfServiceMinAgeSeconds: rules.selfServiceMinAgeSeconds, excludedModels: rules.excludedModels, models: rules.models } }) }
+        { role: 'system', content: config.prompt+(mode==='admin'?ADMIN_PROMPT:'') },
+        { role: 'user', content: JSON.stringify({ log: { request_id: log.request_id, user_id: log.user_id, model_name: log.model_name, channel: log.channel, quota: log.quota, prompt_tokens: log.prompt_tokens, completion_tokens: log.completion_tokens, is_stream: log.is_stream, created_at: log.created_at, other: safe(log.other) }, rules: { refundBasisPoints: rules.refundBasisPoints, selfServiceMaxQuota: rules.selfServiceMaxQuota, selfServiceMinAgeSeconds: rules.selfServiceMinAgeSeconds, excludedModels: rules.excludedModels, models: rules.models },...(mode==='admin'?{previousReview:previousReview?{decision:previousReview.decision,confidence:previousReview.confidence,reason:previousReview.reason,evidence:previousReview.evidence}:null}: {}) }) }
       ]
     };
     try {
@@ -151,11 +155,15 @@ export class AIReviewer {
       const parsed = JSON.parse(content);
       const decision = decisionSet.has(parsed?.decision) ? parsed.decision : 'uncertain';
       const confidence = Math.max(0, Math.min(1, Number(parsed?.confidence) || 0));
+      const analysis=mode==='admin'?{
+        recommendation:recommendationSet.has(parsed?.recommendation)?parsed.recommendation:'manual',
+        summary:safe(parsed?.summary,1200)||'AI 未提供综合判断'
+      }:null;
       return this.store.saveAiReview({
         requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion,
         decision, confidence, reason: safe(parsed?.reason, 1000) || 'AI 未提供理由',
         evidence: Array.isArray(parsed?.evidence) ? parsed.evidence.slice(0, 12).map(v => safe(v, 300)) : [],
-        rawResponse: safe(content, 8000), status: 'completed'
+        rawResponse: safe(content, 8000), status: 'completed',analysis
       });
     } catch (error) {
       return this.store.saveAiReview({
