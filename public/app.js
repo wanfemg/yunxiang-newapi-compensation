@@ -191,8 +191,9 @@ async function openClaimGroup(owner,page=1){
   if(claimGroup?.owner!==Number(owner)||claimGroup.page!==page||s.page!=='adminClaims')return;
   const group=summary.items[0];if(!group){$('#detail-body').innerHTML=empty('此用户在当前板块已无申请');return;}
   const models=new Map();for(const c of data.items){if(!models.has(c.log.model_name))models.set(c.log.model_name,[]);models.get(c.log.model_name).push(c);}
-  const actions=status==='pending'?'<button class="secondary" data-batch="approve">审核所选</button><button class="danger" data-batch="reject">驳回所选</button>':status==='approved'?'<button class="primary" data-batch="execute">核验并执行所选申请</button>':'';
-  const cards=[...models].map(([model,items])=>'<details class="claim-model" open><summary><span>'+icon('chevron-right')+esc(model)+'</span><small>本页 '+items.length+' 笔</small></summary><div class="claim-model-items">'+items.map(c=>'<div class="claim-line"><div class="claim-line-main">'+(['pending','approved'].includes(c.status)?'<label class="check-label"><input name="claim-select" type="checkbox" value="'+c.id+'" aria-label="选择申请 '+esc(c.request_id)+'" '+(c.status!==status?'disabled':'')+'></label>':'')+'<div><strong>'+money(c.status==='succeeded'?c.amount:c.amount||c.expectedAmount)+'</strong><span class="sub">'+esc(compensationLabel(c))+'</span></div>'+badge(c.status)+'</div><div class="claim-request"><span>'+esc(c.request_id)+'</span><small>'+date(c.created_at)+'</small></div><button class="ghost" data-detail="'+c.id+'">核验详情 '+icon('chevron-right')+'</button></div>').join('')+'</div></details>').join('');
+  const selectable=data.items.filter(c=>c.status===status&&['pending','approved'].includes(c.status));
+  const actions=(selectable.length?'<label class="check-label claim-select-all"><input type="checkbox" data-select-all>全选本页</label>':'')+(status==='pending'?'<button class="secondary" data-batch="approve">审核所选</button><button class="danger" data-batch="reject">驳回所选</button>':status==='approved'?'<button class="primary" data-batch="execute">核验并执行所选申请</button>':'');
+  const cards=[...models].map(([model,items])=>{const eligible=items.filter(c=>c.status===status&&['pending','approved'].includes(c.status));return '<details class="claim-model" open><summary><span>'+icon('chevron-right')+'<label class="check-label model-select-label"><input type="checkbox" data-model-select="'+esc(model)+'" aria-label="选择模型 '+esc(model)+'" '+(!eligible.length?'disabled':'')+'> '+esc(model)+'</label></span><small>本页 '+items.length+' 笔</small></summary><div class="claim-model-items">'+items.map(c=>'<div class="claim-line"><div class="claim-line-main">'+(['pending','approved'].includes(c.status)?'<label class="check-label"><input name="claim-select" type="checkbox" value="'+c.id+'" data-claim-model="'+esc(model)+'" aria-label="选择申请 '+esc(c.request_id)+'" '+(c.status!==status?'disabled':'')+'></label>':'')+'<div><strong>'+money(c.status==='succeeded'?c.amount:c.amount||c.expectedAmount)+'</strong><span class="sub">'+esc(compensationLabel(c))+'</span></div>'+badge(c.status)+'</div><div class="claim-request"><span>'+esc(c.request_id)+'</span><small>'+date(c.created_at)+'</small></div><button class="ghost" data-detail="'+c.id+'">核验详情 '+icon('chevron-right')+'</button></div>').join('')+'</div></details>';}).join('');
   $('#detail-body').innerHTML='<div class="detail-account">'+icon('user-round')+'<div><strong>'+esc(group.username)+'</strong><span class="sub">原站用户 ID '+group.user_id+'</span></div></div><div class="group-totals"><div><small>涉及模型</small><strong>'+group.models+'</strong></div><div><small>申请笔数</small><strong>'+group.applications+'</strong></div><div><small>本组额度</small><strong class="amount">'+money(group.expectedAmount)+'</strong></div></div><div class="group-action-bar">'+actions+'</div>'+cards+'<div class="group-pagination"><span>'+page+' / '+Math.max(1,Math.ceil(data.total/30))+'</span><button class="ghost" data-group-page="-1" '+(page<=1?'disabled':'')+'>'+icon('chevron-left')+'上一页</button><button class="ghost" data-group-page="1" '+(page*30>=data.total?'disabled':'')+'>下一页'+icon('chevron-right')+'</button></div>';icons();
 }
 async function adminConsumption(){
@@ -543,6 +544,20 @@ document.addEventListener('toggle',event=>{if(event.target.matches?.('.refund-re
 document.addEventListener('change',event=>{
   const el=event.target;
   if(el.id==='email-preview-event')$('#email-template-preview').innerHTML=emailPreview(el.value,money,esc);
+  if(el.matches('[data-select-all]')){
+    document.querySelectorAll('#detail-body [name="claim-select"]:not(:disabled)').forEach(input=>{input.checked=el.checked;});
+  }
+  if(el.matches('[data-model-select]')){
+    document.querySelectorAll('#detail-body [name="claim-select"][data-claim-model="'+CSS.escape(el.dataset.modelSelect)+'"]:not(:disabled)').forEach(input=>{input.checked=el.checked;});
+    const all=document.querySelector('[data-select-all]'),selectable=[...document.querySelectorAll('#detail-body [name="claim-select"]:not(:disabled)')];
+    if(all)all.checked=selectable.length>0&&selectable.every(input=>input.checked);
+  }
+  if(el.name==='claim-select'){
+    const model=el.dataset.claimModel,modelBox=model?document.querySelector('[data-model-select="'+CSS.escape(model)+'"]'):null;
+    if(modelBox){const items=[...document.querySelectorAll('#detail-body [name="claim-select"][data-claim-model="'+CSS.escape(model)+'"]:not(:disabled)')];modelBox.checked=items.length>0&&items.every(input=>input.checked);}
+    const all=document.querySelector('[data-select-all]'),selectable=[...document.querySelectorAll('#detail-body [name="claim-select"]:not(:disabled)')];
+    if(all)all.checked=selectable.length>0&&selectable.every(input=>input.checked);
+  }
   if(el.name==='model-choice'){
     if(el.checked){
       pickedModels.add(el.value);

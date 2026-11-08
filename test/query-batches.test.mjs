@@ -75,13 +75,14 @@ test('超时整批冻结、只对账不重发、明确拒绝释放整批占用',
   }
 });
 test('AI 全部结束后才合并发放，单条模型审核不重复请求',async t=>{
-  const f=fixture({logs:[log('a'),log('b',{id:101})],rules:{aiEnabled:true}});t.after(()=>f.store.close());
+  const f=fixture({logs:[log('a'),log('b',{id:101})],rules:{aiEnabled:true,aiDailyLimit:1}});t.after(()=>f.store.close());
   let reviews=0;
-  f.service.ai={promptVersion:()=> 'batch-test',review:async source=>{
+  f.service.ai={promptVersion:()=> 'batch-test',review:async (source,_,options={})=>{
     assert.equal(f.calls(),0);reviews++;
-    return f.store.saveAiReview({requestId:source.request_id,userId:user.id,fingerprint:(await import('../src/ai-review.mjs')).logFingerprint(source),promptVersion:'batch-test',decision:'empty',confidence:0.98,reason:'空回',status:'completed',rawResponse:null});
+    return f.store.saveAiReview({requestId:source.request_id,userId:user.id,reviewBatchId:options.batchId,fingerprint:(await import('../src/ai-review.mjs')).logFingerprint(source),promptVersion:'batch-test',decision:'empty',confidence:0.98,reason:'空回',status:'completed',rawResponse:null});
   }};
   const b=await queried(f);await f.service.batches.submit(user,b.id);assert.equal(reviews,2);assert.equal(f.calls(),1);
+  assert.equal(f.store.aiReviewCount(new Date().toISOString().slice(0,10),user.id),1);
   await f.service.batches.submit(user,b.id);assert.equal(reviews,2);assert.equal(f.calls(),1);
 });
 test('最终核验日志变化、AI规则改变，整批不补且保留人工处理',async t=>{

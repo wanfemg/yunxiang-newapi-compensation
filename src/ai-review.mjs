@@ -125,19 +125,22 @@ export class AIReviewer {
     const existing=this.inflight.get(key);
     if(existing)return existing.promise;
     const promise=this.runReview(log,rules,{...options,mode});
-    this.inflight.set(key,{promise,userId:log.user_id,day:new Date(this.now()).toISOString().slice(0,10)});
+    this.inflight.set(key,{promise,userId:log.user_id,day:new Date(this.now()).toISOString().slice(0,10),batchId:options.batchId||null});
     try{return await promise;}finally{this.inflight.delete(key);}
   }
-  async runReview(log, rules,{mode='automatic',previousReview=null}={}) {
+  async runReview(log, rules,{mode='automatic',previousReview=null,batchId=null}={}) {
     const promptVersion = this.promptVersion(mode);
     const fingerprint = logFingerprint(log);
     const existing = this.store.aiReview(log.request_id, fingerprint, promptVersion);
     if (existing) return existing;
     const today = new Date(this.now()).toISOString().slice(0, 10);
-    const used = this.store.aiReviewCount(today, log.user_id)+[...this.inflight.values()].filter(item=>item.userId===log.user_id&&item.day===today).length;
+    const inflight = new Set([...this.inflight.values()]
+      .filter(item=>item.userId===log.user_id&&item.day===today)
+      .map(item=>item.batchId||item.promise));
+    const used = this.store.aiReviewCount(today, log.user_id)+inflight.size;
     if (used >= rules.aiDailyLimit) throw new AppError('AI 审核次数已达今日上限，请转管理员审核', 429);
     if (!this.configured()) return this.store.saveAiReview({
-      requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion,
+      requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion, reviewBatchId: batchId,
       decision: 'uncertain', confidence: 0, reason: 'AI 服务未配置，转管理员审核', evidence: [], rawResponse: null, status: 'fallback'
     });
     const config = this.config();
@@ -160,7 +163,7 @@ export class AIReviewer {
         summary:safe(parsed?.summary,1200)||'AI 未提供综合判断'
       }:null;
       return this.store.saveAiReview({
-        requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion,
+        requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion, reviewBatchId: batchId,
         decision, confidence, reason: safe(parsed?.reason, 1000) || 'AI 未提供理由',
         evidence: Array.isArray(parsed?.evidence) ? parsed.evidence.slice(0, 12).map(v => safe(v, 300)) : [],
         rawResponse: safe(content, 8000), status: 'completed',analysis

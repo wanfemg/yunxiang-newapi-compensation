@@ -170,7 +170,7 @@ export class Compensation {
       this.store.event(claim.id,user.id,'ai_review_started',{promptVersion:this.ai.promptVersion?.()||'empty-v1'});
       this.store.notifyClaim('ai_reviewing',claim,'正在读取日志、补偿规则与重复申请记录');
       try {
-        aiReview = await this.ai.review(claim.log, activeRules);
+        aiReview = await this.ai.review(claim.log, activeRules, { batchId: runId || null });
       } catch (error) {
         aiReview = this.store.saveAiReview({
           requestId: claim.request_id,
@@ -182,7 +182,8 @@ export class Compensation {
           reason: error instanceof AppError ? error.message : 'AI 服务暂不可用，转管理员审核',
           evidence: [],
           rawResponse: null,
-          status: 'fallback'
+          status: 'fallback',
+          reviewBatchId: runId || null
         });
       }
     }

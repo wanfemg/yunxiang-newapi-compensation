@@ -31,6 +31,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS ai_reviews (
         id TEXT PRIMARY KEY, request_id TEXT NOT NULL, user_id INTEGER NOT NULL,
         log_fingerprint TEXT NOT NULL, prompt_version TEXT NOT NULL,
+        review_batch_id TEXT,
         decision TEXT NOT NULL, confidence REAL NOT NULL, reason TEXT NOT NULL,
         evidence TEXT NOT NULL, raw_response TEXT, status TEXT NOT NULL,
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
@@ -46,6 +47,7 @@ export class Store {
         UPDATE claims SET reserved_at=COALESCE((SELECT MAX(created_at) FROM events WHERE claim_id=claims.id AND action='execution_reserved'),updated_at) WHERE execution_day IS NOT NULL`);
     }
     if(!this.db.prepare('PRAGMA table_info(ai_reviews)').all().some(c=>c.name==='analysis'))this.db.exec('ALTER TABLE ai_reviews ADD COLUMN analysis TEXT');
+    if(!this.db.prepare('PRAGMA table_info(ai_reviews)').all().some(c=>c.name==='review_batch_id'))this.db.exec('ALTER TABLE ai_reviews ADD COLUMN review_batch_id TEXT');
     this.db.exec('CREATE INDEX IF NOT EXISTS claims_run ON claims(user_id,run_id)');
     if (!this.db.prepare('PRAGMA table_info(notifications)').all().some(c => c.name === 'dedupe_key')) {
       this.db.exec('ALTER TABLE notifications ADD COLUMN dedupe_key TEXT');
@@ -355,7 +357,7 @@ export class Store {
   }
   aiReviewCount(day, userId) {
     const start = Date.parse(day + 'T00:00:00.000Z'), end = start + 86400000;
-    return this.db.prepare('SELECT COUNT(*) AS n FROM ai_reviews WHERE user_id=? AND created_at>=? AND created_at<?').get(userId, start, end).n;
+    return this.db.prepare('SELECT COUNT(DISTINCT COALESCE(review_batch_id,id)) AS n FROM ai_reviews WHERE user_id=? AND created_at>=? AND created_at<?').get(userId, start, end).n;
   }
   saveAiReview(input) {
     return this.transaction(() => {
@@ -363,8 +365,8 @@ export class Store {
       const existing = this.aiReview(input.requestId, input.fingerprint, input.promptVersion);
       if (existing) return existing;
       const id = randomUUID();
-      this.db.prepare('INSERT INTO ai_reviews(id,request_id,user_id,log_fingerprint,prompt_version,decision,confidence,reason,evidence,raw_response,status,created_at,updated_at,analysis) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-        .run(id, input.requestId, input.userId, input.fingerprint, input.promptVersion, input.decision, input.confidence, input.reason, JSON.stringify(input.evidence || []), input.rawResponse, input.status, now, now,input.analysis?JSON.stringify(input.analysis):null);
+      this.db.prepare('INSERT INTO ai_reviews(id,request_id,user_id,log_fingerprint,prompt_version,review_batch_id,decision,confidence,reason,evidence,raw_response,status,created_at,updated_at,analysis) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id, input.requestId, input.userId, input.fingerprint, input.promptVersion, input.reviewBatchId || null, input.decision, input.confidence, input.reason, JSON.stringify(input.evidence || []), input.rawResponse, input.status, now, now,input.analysis?JSON.stringify(input.analysis):null);
       return this.aiReview(input.requestId, input.fingerprint, input.promptVersion);
     });
   }
