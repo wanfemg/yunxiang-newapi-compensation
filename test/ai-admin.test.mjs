@@ -48,6 +48,23 @@ test('管理员主动 AI 辅助审核仅提供依据，并发和重复点击只�
   await assert.rejects(()=>f.service.assistReview(admin,c.id),/关闭|开启/);
 });
 
+test('管理员 AI 辅助审核不受每日次数限制',async t=>{
+  const f=fixture({rules:{aiEnabled:true,aiDailyLimit:1}});
+  t.after(()=>f.store.close());
+  f.store.saveAIConfig({baseUrl:'https://ai.example/v1',apiKey:'fixture-key',model:'model'},1);
+  let calls=0;
+  f.service.ai=new AIReviewer({store:f.store,env:{},fetcher:async()=>{
+    calls++;
+    return new Response(JSON.stringify({choices:[{message:{content:'{"decision":"uncertain","confidence":0.5,"reason":"需人工核对","evidence":[]}'}}]}));
+  }});
+  const rules=f.store.rules();
+  await f.service.ai.review(f.logs[0],rules,{mode:'admin'});
+  const second={...f.logs[0],request_id:'admin-unlimited-review'};
+  await f.service.ai.review(second,rules,{mode:'admin'});
+  assert.equal(calls,2);
+  assert.equal(f.store.aiReviewCount(new Date().toISOString().slice(0,10),f.logs[0].user_id),2);
+});
+
 test('管理员二次 AI 复核综合原判定并给出明确建议，一键通过补额度仅在建议通过时执行',async t=>{
   const f=fixture({rules:{aiEnabled:true,executionEnabled:true}});
   t.after(()=>f.store.close());

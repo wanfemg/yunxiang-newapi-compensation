@@ -133,12 +133,14 @@ export class AIReviewer {
     const fingerprint = logFingerprint(log);
     const existing = this.store.aiReview(log.request_id, fingerprint, promptVersion);
     if (existing) return existing;
-    const today = new Date(this.now()).toISOString().slice(0, 10);
-    const inflight = new Set([...this.inflight.values()]
-      .filter(item=>item.userId===log.user_id&&item.day===today)
-      .map(item=>item.batchId||item.promise));
-    const used = this.store.aiReviewCount(today, log.user_id)+inflight.size;
-    if (used >= rules.aiDailyLimit) throw new AppError('AI 审核次数已达今日上限，请转管理员审核', 429);
+    if (mode !== 'admin') {
+      const today = new Date(this.now()).toISOString().slice(0, 10);
+      const inflight = new Set([...this.inflight.values()]
+        .filter(item=>item.userId===log.user_id&&item.day===today)
+        .map(item=>item.batchId||item.promise));
+      const used = this.store.aiReviewCount(today, log.user_id)+inflight.size;
+      if (used >= rules.aiDailyLimit) throw new AppError('AI 审核次数已达今日上限，请转管理员审核', 429);
+    }
     if (!this.configured()) return this.store.saveAiReview({
       requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion, reviewBatchId: batchId,
       decision: 'uncertain', confidence: 0, reason: 'AI 服务未配置，转管理员审核', evidence: [], rawResponse: null, status: 'fallback'
