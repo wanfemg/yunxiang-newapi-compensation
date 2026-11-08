@@ -1,11 +1,15 @@
 // Local mock upstream only; no external balances are changed.
 import { createRequire } from 'node:module';
+import { mkdirSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { log } from './helpers.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH);
 const fixture = await import('./preview.mjs');
+let queryNow=Date.now();
+fixture.service.logQueries.clock=()=>queryNow;
+mkdirSync('output/playwright',{recursive:true});
 let queries = 0;
 fixture.remote.server.on('request', req => {
   const url = new URL(req.url, 'http://localhost');
@@ -32,7 +36,9 @@ try {
   await query();
   assert.equal(queries, 1);
   await query();
-  assert.equal(queries, 1, 'repeated list queries reuse the snapshot');
+  assert.equal(queries, 1, 'same-second queries do not repeat upstream scans');
+  assert.equal(await page.locator('#log-filter,.filter-disclosure').count(),0);
+  assert.ok(await page.locator('.query-progress').isVisible());
   await page.locator('.model-group>summary').first().click();
   await page.locator('.desktop-log-details [data-apply="fixture-self-service"]').click();
   await page.locator('#operation-submit').click();
@@ -45,17 +51,17 @@ try {
   assert.equal(await page.locator('.desktop-log-details [data-apply="fixture-request-2"]').count(), 1, 'unclaimed candidates remain');
   const existing = fixture.store.byRequest('fixture-request-1');
   assert.ok(await page.locator('.desktop-log-details [data-detail="' + existing.id + '"]').count(), 'existing claim links to progress');
-  fixture.remote.data.logs.push(log('incremental-new', { id: 105, quota: 60 }));
-  await new Promise(resolve => setTimeout(resolve, 16_000));
+  fixture.remote.data.logs.push(log('incremental-new', { id: 105, quota: 60,created_at:Math.floor(queryNow/1000)+1 }));
+  queryNow+=2000;
   await query();
   assert.equal(queries, 2);
   assert.equal(await page.locator('.desktop-log-details [data-apply="incremental-new"]').count(), 1);
   assert.equal(await page.locator('[data-apply="fixture-self-service"]').count(), 0);
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-  await page.screenshot({ path: 'test-results/query-cache-mobile.png', fullPage: true });
+  await page.screenshot({ path: 'output/playwright/query-cache-mobile.png', fullPage: true });
   assert.deepEqual(errors, []);
-  console.log('PASS: cached repeat queries, successful claims removed, pending progress, retained unclaimed logs, incremental discovery and mobile layout.');
+  console.log('PASS: strict incremental queries, filters removed, persistent progress, successful claims removed, pending progress, retained unclaimed logs and mobile layout.');
 } finally {
   await browser.close();
   fixture.server.closeAllConnections();

@@ -16,7 +16,10 @@ export function rules(overrides = {}) {
 export function fixture(options = {}) {
   const store = new Store(); store.saveRules(rules(options.rules), admin.id, 1);
   const logs = options.logs || [log()]; let calls = 0;
-  const upstream = { logs: async ({user: owner} = {}) => ({items: owner ? logs.filter(l=>l.user_id===owner.id) : logs, total: logs.length, page: 1}), log: async id => { const x=logs.filter(l=>l.request_id===id); if(x.length!==1)throw Error('ambiguous'); return structuredClone(x[0]); }, target: async () => user, credit: async (...args) => { calls++; if(options.credit) return options.credit(...args); } };
+  const upstream = { logs: async ({user: owner,page=1,start=0,end=Infinity,model='',requestId='',channel=''} = {}) => {
+    const rows=logs.filter(l=>(!owner||l.user_id===owner.id)&&l.created_at>=start&&l.created_at<=end&&(!model||l.model_name===model)&&(!requestId||l.request_id===requestId)&&(!channel||l.channel===Number(channel)));
+    return {items:structuredClone(rows.slice((page-1)*30,page*30)),total:rows.length,page};
+  }, log: async id => { const x=logs.filter(l=>l.request_id===id); if(x.length!==1)throw Error('ambiguous'); return structuredClone(x[0]); }, target: async () => user, credit: async (...args) => { calls++; if(options.credit) return options.credit(...args); } };
   return { store, upstream, service: new Compensation(store, upstream), logs, calls: () => calls };
 }
 export async function mockServer() {

@@ -3,6 +3,8 @@ import {enhanceControls} from './controls.js';
 import {renderSnapshot,bindSnapshot} from './snapshot.js';
 import {notificationCenter,emailPreview} from './notification-center.js';
 import {watchUIVersion} from './ui-version.js';
+import {userInbox} from './user-inbox.js';
+import {renderAuditLog} from './audit-log.js';
 const canonicalOrigin = document.querySelector('meta[name="application-origin"]')?.content;
 if (canonicalOrigin && new URL(canonicalOrigin).protocol === 'https:' && location.origin !== canonicalOrigin) {
   location.replace(canonicalOrigin + '/');
@@ -19,6 +21,7 @@ let catalog=null,aiConfig=null,adminStatus='pending',adminDrill=null,pickedModel
 let excludedModels=new Map();
 const modelRuleKey=(channelId,model)=>JSON.stringify([channelId,model]);
 let storagePlan=null,notificationTab='ding';
+let inboxUnreadOnly=false,inboxTimer=null,aiSettingsSave=null;
 const fundingLabel=source=>({subscription:'订阅额度 · 站长审批',wallet:'钱包余额',unknown:'资金来源待核实'}[source]||'资金来源待核实');
 const compensationLabel=c=>c?.compensationLabel||(c?.fundingSource==='subscription'?'订阅空回 · 余额补偿':c?.source==='manual'?'人工空回补偿':'空回补偿');
 const statuses = {pending:'待审核',approved:'已通过 · 待执行',rejected:'已驳回',executing:'执行中',succeeded:'补偿成功',failed:'明确失败',unknown:'结果待确认'};
@@ -43,6 +46,7 @@ const loading=message=>'<div class="loading liquid-loading" role="status" aria-b
 function busyButton(button,busy){if(!button)return;button.classList.toggle('is-loading',busy);button.setAttribute('aria-busy',String(busy));}
 const iconNames={overview:'house',statistics:'chart-no-axes-combined',logs:'refresh-cw',claims:'clipboard-list',records:'history',rules:'shield-check',help:'circle-help',adminOverview:'layout-dashboard',adminLogs:'search',adminClaims:'list-checks',stats:'chart-column',settings:'settings',notifications:'bell',audit:'file-clock'};
 const icon=name=>'<i data-lucide="'+name+'" aria-hidden="true"></i>';
+$('#search-toggle').insertAdjacentHTML('beforebegin','<button id="inbox-toggle" class="ghost icon-button" data-nav="inbox" aria-label="站内通知" title="站内通知">'+icon('bell')+'<span id="inbox-badge" class="inbox-badge" hidden></span></button>');
 function icons(){enhanceControls();window.lucide?.createIcons({attrs:{'stroke-width':1.7,'aria-hidden':'true'}});}
 function theme(){const dark=document.documentElement.dataset.theme==='dark';$('#theme-toggle').innerHTML=icon(dark?'sun':'moon');$('#theme-toggle').setAttribute('aria-label',dark?'切换浅色模式':'切换深色模式');icons();}
 function setDrawer(open, restore=true){
@@ -53,7 +57,7 @@ function setDrawer(open, restore=true){
 }
 mobile.addEventListener('change',()=>setDrawer(!mobile.matches,false));
 function stopStatistics(){clearTimeout(statisticsTimer);statisticsTimer=null;statisticsRequest++;}
-function availablePages(){return ['overview','statistics','logs','claims','records','rules','help',...(s.user?.role>=10?['adminOverview','adminLogs','adminClaims','stats','settings','notifications','audit']:[])];}
+function availablePages(){return ['overview','statistics','logs','claims','records','rules','help','inbox',...(s.user?.role>=10?['adminOverview','adminLogs','adminClaims','stats','settings','notifications','audit']:[])];}
 function searchPages(){const query=$('#page-search').value.trim().toLowerCase();$('#search-results').innerHTML=availablePages().filter(p=>pages[p].toLowerCase().includes(query)).map(navButton).join('')||empty('没有匹配页面');icons();}
 async function navigate(page){if(!availablePages().includes(page))return;stopStatistics();if(page==='logs')refundQueried=false;s.page=page;s.n=1;$('#account-menu').hidden=true;$('#account-toggle').setAttribute('aria-expanded','false');$('#search-dialog').close();if(mobile.matches)setDrawer(false);await render();window.scrollTo({top:0});$('#page-title').tabIndex=-1;$('#page-title').focus({preventScroll:true});}
 try{document.documentElement.dataset.theme=localStorage.getItem('huixiang-theme')==='light'?'light':'dark';}catch{}
@@ -69,7 +73,7 @@ async function api(path, method='GET', body) {
   if(!r.ok||!value.success){if(r.status===401&&!path.startsWith('/api/auth/')) loginView();throw Error(value.message||'请求失败');}return value.data;
   }finally{api.pending--;if(!api.pending)document.documentElement.classList.remove('network-loading');}
 }
-function loginView(){stopStatistics();setDrawer(false,false);$('#search-dialog').close();$('#account-menu').hidden=true;s.user=null;s.csrf='';currentLogs=[];operation=null;for(const key of Object.keys(filters))filters[key]=key==='view'?'eligible':'';$('#content').replaceChildren();$('#detail-body').replaceChildren();$('#operation-body').replaceChildren();$('#operation-results').replaceChildren();$('#operation-dialog').close();$('#login').hidden=false;$('#workspace').hidden=true;$('#detail-dialog').close();}
+function loginView(){stopStatistics();clearInterval(inboxTimer);inboxTimer=null;inboxUnreadOnly=false;syncInboxBadge(0);setDrawer(false,false);$('#search-dialog').close();$('#account-menu').hidden=true;s.user=null;s.csrf='';currentLogs=[];operation=null;for(const key of Object.keys(filters))filters[key]=key==='view'?'eligible':'';$('#content').replaceChildren();$('#detail-body').replaceChildren();$('#operation-body').replaceChildren();$('#operation-results').replaceChildren();$('#operation-dialog').close();$('#login').hidden=false;$('#workspace').hidden=true;$('#detail-dialog').close();}
 function badge(v){return '<span class="badge '+(v==='succeeded'?'good':['failed','unknown','rejected'].includes(v)?'bad':'neutral')+'">'+esc(statuses[v]||v)+'</span>';}
 function empty(v){return '<div class="empty"><div class="symbol">↺</div>'+esc(v)+'</div>';}
 function panel(title,body,note=''){return '<section class="panel"><div class="panel-head"><div><h3>'+esc(title)+'</h3>'+(note?'<p class="muted">'+esc(note)+'</p>':'')+'</div></div>'+body+'</section>';}
@@ -77,14 +81,14 @@ function table(headers,rows){return '<div class="table-scroll"><table><thead><tr
 function metric(label,value,note,highlight=false){return '<div class="metric'+(highlight?' highlight':'')+'"><small>'+esc(label)+'</small><strong>'+(typeof value==='number'?(['累计补偿额度','今日剩余额度','空回补额度'].includes(label)?money(value):num(value)):esc(value))+'</strong><em>'+esc(note)+'</em></div>';}
 function lines(rows){return '<div class="rule-lines">'+rows.map(([k,v])=>'<div class="rule-line"><span>'+esc(k)+'</span><strong>'+esc(v)+'</strong></div>').join('')+'</div>';}
 function pager(total,count){return '<div class="pagination"><span>当前页 '+count+' 条 / 原始记录 '+num(total)+' 条</span><div><button class="ghost" data-turn="-1" '+(s.n<=1?'disabled':'')+'>上一页</button>'+s.n+'<button class="ghost" data-turn="1" '+(s.n*30>=total?'disabled':'')+'>下一页</button></div></div>';}
-function nav(){const admin=['adminOverview','adminLogs','adminClaims','stats','settings','notifications','audit'];$('#nav').innerHTML=navButton('overview')+'<div class="nav-group">控制台</div>'+['statistics','logs'].map(navButton).join('')+'<div class="nav-group">个人中心</div>'+['claims','records','rules','help'].map(navButton).join('')+(s.user.role>=10?'<div class="nav-group">站长管理</div>'+admin.map(navButton).join(''):'');icons();}
+function nav(){const admin=['adminOverview','adminLogs','adminClaims','stats','settings','notifications','audit'];$('#nav').innerHTML=navButton('overview')+'<div class="nav-group">控制台</div>'+['statistics','logs'].map(navButton).join('')+'<div class="nav-group">个人中心</div>'+['claims','records','inbox','rules','help'].map(navButton).join('')+(s.user.role>=10?'<div class="nav-group">站长管理</div>'+admin.map(navButton).join(''):'');icons();}
 function navButton(p){return '<button class="nav-button '+(s.page===p?'active':'')+'" data-nav="'+p+'" '+(s.page===p?'aria-current="page"':'')+'>'+icon(iconNames[p])+pages[p]+'</button>';}
-async function enter(data){refundQueried=false;catalog=null;s.display=null;s.user=data.user;s.csrf=data.csrf;try{s.display=await api('/api/display');}catch(e){toast('站点额度配置读取失败：'+e.message);}s.page=s.user.role>=10?'adminOverview':'overview';$('#login').hidden=true;$('#workspace').hidden=false;$('#account-name').textContent=s.user.display_name+(s.user.role>=10?' · 站长':'');$('#account-toggle').textContent=(s.user.display_name||s.user.username).slice(0,1);setDrawer(!mobile.matches,false);await render();}
+async function enter(data){refundQueried=false;catalog=null;s.display=null;s.user=data.user;s.csrf=data.csrf;try{s.display=await api('/api/display');}catch(e){toast('站点额度配置读取失败：'+e.message);}s.page=s.user.role>=10?'adminOverview':'overview';$('#login').hidden=true;$('#workspace').hidden=false;$('#account-name').textContent=s.user.display_name+(s.user.role>=10?' · 站长':'');$('#account-toggle').textContent=(s.user.display_name||s.user.username).slice(0,1);setDrawer(!mobile.matches,false);await render();clearInterval(inboxTimer);inboxTimer=setInterval(()=>{if(s.user&&!s.busy&&!api.pending&&!document.hidden)refreshInboxBadge().catch(()=>{});},30000);}
 async function render(){
   const owner=s.user,page=s.page;
   $('#content').classList.remove('is-fetching');$('#content').removeAttribute('aria-busy');
   nav();$('#page-title').textContent=pages[s.page];$('#breadcrumb').textContent=pages[s.page];$('#page-subtitle').textContent=s.page==='statistics'?'查看当前账号的补回额度与每日趋势。':s.page==='help'?'了解查询、审核、补偿和失败处理流程。':'正常自助返还，异常提交审批。每笔处理有据可查。';$('#page-kicker').textContent=['overview','statistics','logs','claims','records','rules','help'].includes(s.page)?'MY WORKSPACE':'ADMINISTRATION';$('#content').innerHTML=loading('正在读取记录…');$('#refresh').hidden=s.page==='statistics';
-  try{if(s.page.endsWith('Overview')||s.page==='overview')await overview();else if(s.page==='statistics')await personalStatistics();else if(['logs','adminLogs'].includes(s.page))await logs();else if(['claims','records','adminClaims'].includes(s.page))await claims();else if(['rules','settings'].includes(s.page))await rules();else if(s.page==='help')help();else if(s.page==='stats')await stats();else if(s.page==='notifications')await notifications();else await audit();icons();}
+  try{if(s.page.endsWith('Overview')||s.page==='overview')await overview();else if(s.page==='statistics')await personalStatistics();else if(['logs','adminLogs'].includes(s.page))await logs();else if(['claims','records','adminClaims'].includes(s.page))await claims();else if(['rules','settings'].includes(s.page))await rules();else if(s.page==='help')help();else if(s.page==='inbox')await inbox();else if(s.page==='stats')await stats();else if(s.page==='notifications')await notifications();else await audit();icons();if(s.page!=='inbox')refreshInboxBadge().catch(()=>{});}
   catch(e){if(owner!==s.user||page!==s.page)return;$('#content').innerHTML='<div class="notice warning">'+esc(e.message)+'</div><p class="muted">核对 云中猫API小站 连接与管理凭据后刷新。页面不使用示例数据替代真实记录。</p>';}
 }
 async function overview(){
@@ -148,22 +152,27 @@ function skippedModelsMarkup(data){
   return '<section class="skipped-models" aria-label="已跳过的模型"><div class="refund-history-heading"><h3>已跳过的模型</h3><span>'+num(data.skippedCount)+' 笔记录</span></div><ul>'+data.skippedModels.map(entry=>'<li><strong>'+esc(entry.model)+'</strong><span>'+num(entry.count)+' 笔 · '+esc(entry.reason)+'</span></li>').join('')+'</ul></section>';
 }
 async function refundLanding(){const owner=s.user,page=s.page,meta=await refundMeta();if(s.user!==owner||s.page!==page)return;currentLogs=[];selectedLogs.clear();$('#content').innerHTML=refundHeader(meta.overview)+refundRecordsMarkup(meta.records);icons();}
-async function logs(){
+async function logs({refresh=false}={}){
   const owner=s.user,page=s.page;
   if(s.page==='logs'&&!refundQueried){await refundLanding();return;}
   if(s.page==='adminLogs'){await adminConsumption();return;}
-  const admin=s.page==='adminLogs',q=new URLSearchParams({page:s.n,model:filters.model,requestId:filters.requestId,channel:admin?filters.channel:''});for(const k of ['start','end'])if(filters[k])q.set(k,Math.floor(new Date(filters[k]).getTime()/1000));
+  const admin=false,q=new URLSearchParams({page:s.n,view:'eligible'});
+  if(refresh)q.set('refresh','1');
   const data=await api((admin?'/api/admin':'/api')+'/logs?'+q);
   if(s.user!==owner||s.page!==page)return;selectedLogs.clear();currentLogs=data.items;
-  const shown=data.items.filter(v=>filters.view==='all'||(filters.view==='pending'?v.assessment.candidate&&v.assessment.evidence!=='empty_marked':v.assessment.eligible));
-  const toolbar='<form id="log-filter" class="toolbar">'+filterInput('model','完整模型名')+filterInput('requestId','原请求标识')+(admin?filterInput('channel','渠道 ID','number'):'')+filterInput('start','消费起始','datetime-local')+filterInput('end','消费截止','datetime-local')+'<label>本页展示<select name="view">'+[['eligible','符合规则 / 可申请'],['pending','待核实候选'],['all','全部消费']].map(([v,t])=>'<option value="'+v+'" '+(filters.view===v?'selected':'')+'>'+t+'</option>').join('')+'</select></label><button class="secondary">查询</button></form>';
+  const shown=data.items;
+  const toolbar='<form id="log-filter" class="toolbar">'+filterInput('model','完整模型名')+filterInput('requestId','原请求标识')+(admin?filterInput('channel','渠道 ID','number'):'')+filterInput('start','消费起始','datetime-local')+filterInput('end','消费截止','datetime-local')+'<label>展示范围<select name="view">'+[['eligible','符合规则 / 可申请'],['pending','待核实候选'],['all','全部消费']].map(([v,t])=>'<option value="'+v+'" '+(filters.view===v?'selected':'')+'>'+t+'</option>').join('')+'</select></label><button class="secondary">查询</button></form>';
   const rows=shown.map(v=>{const l=v.log,a=v.assessment;return '<tr><td><input type="checkbox" name="log-select" aria-label="选择消费" value="'+esc(l.request_id)+'" '+(!a.canApply?'disabled':'')+'></td><td>'+esc(l.model_name)+'<span class="sub">'+esc(l.request_id||'缺少可靠标识')+'</span></td>'+(admin?'<td>#'+esc(l.user_id)+'<span class="sub">'+esc(l.username)+' · 渠道 '+esc(l.channel)+'</span></td>':'')+'<td>'+money(l.quota)+'<span class="sub">预计返还 '+money(a.expectedQuota)+'</span></td><td>'+num(l.prompt_tokens)+' / '+num(l.completion_tokens)+'</td><td>'+(v.claim?badge(v.claim.status):'<span class="badge '+(a.canApply?'good':'neutral')+'">'+(a.canApply?(a.route==='automatic'?'自助返还':'异常审批'):'暂不可申请')+'</span>')+'<span class="sub" title="'+esc([...a.reasons,...(a.route==='review'?a.reviewReasons:[])].join('；'))+'">'+esc([...a.reasons,...(a.route==='review'?a.reviewReasons:[])].join('；')||({pending:'证据待核实',special:'特殊情形待核实',empty_marked:'有空响应标记'}[a.evidence]))+'</span></td><td>'+date(l.created_at*1000)+'<span class="sub">截止 '+date(a.deadline)+'</span></td><td>'+(v.claim?'<button class="ghost" data-detail="'+v.claim.id+'">进度 →</button>':'<button class="secondary" data-apply="'+esc(l.request_id)+'" '+(!a.canApply?'disabled':'')+'>'+(admin?'手动补偿':a.route==='automatic'?'自助补额度':'提交审批')+'</button>')+'</td></tr>';});
   const groups=new Map();shown.forEach((item,index)=>{const name=item.log.model_name;if(!groups.has(name))groups.set(name,[]);groups.get(name).push({item,row:rows[index]});});
   const available=shown.filter(v=>v.assessment.canApply),expected=available.reduce((sum,v)=>sum+v.assessment.expectedQuota,0);
   const grouped=[...groups].map(([name,entries])=>{const candidates=entries.filter(v=>v.item.assessment.canApply),quota=candidates.reduce((sum,v)=>sum+v.item.assessment.expectedQuota,0);return '<details class="model-group"><summary><span class="model-title"><span class="chevron">›</span>'+esc(name)+'</span><span class="model-stats"><span><small>本页记录</small><strong>'+entries.length+'</strong></span><span><small>可申请</small><strong>'+candidates.length+'</strong></span><span><small>预计返还</small><strong class="amount">'+money(quota)+'</strong></span></span></summary><div class="desktop-log-details">'+table(['选择','模型 / 原请求',...(admin?['用户 / 渠道']:[]),'原消费额度','输入 / 输出 token','资格 / 状态','消费时间 / 截止','操作'],entries.map(v=>v.row))+'</div><div class="mobile-log-details">'+entries.map(({item:v})=>{const l=v.log,a=v.assessment;return '<article class="consumption-card"><div class="consumption-top"><label class="check-label"><input type="checkbox" name="mobile-log-select" aria-label="选择消费 '+esc(l.request_id)+'" value="'+esc(l.request_id)+'" '+(!a.canApply?'disabled':'')+'><span class="request-id">'+esc(l.request_id||'缺少可靠标识')+'</span></label>'+(v.claim?badge(v.claim.status):'<span class="badge neutral">'+(a.canApply?(a.route==='automatic'?'自助返还':'异常审批'):'暂不可申请')+'</span>')+'</div><div class="consumption-info"><span>'+esc(date(l.created_at*1000))+'</span><span>原消费 <strong>'+money(l.quota)+'</strong></span><span>预计返还 <strong>'+money(a.expectedQuota)+'</strong></span><span>输入 / 输出 '+num(l.prompt_tokens)+' / '+num(l.completion_tokens)+'</span>'+(admin?'<span>用户 #'+esc(l.user_id)+' · 渠道 '+esc(l.channel)+'</span>':'')+'</div><p class="field-help">'+esc(a.reasons.join('；')||(a.route==='automatic'?'符合自助规则，将二次核验后返还':a.reviewReasons.join('；')))+'</p><div class="card-actions">'+(v.claim?'<button class="secondary" data-detail="'+esc(v.claim.id)+'">查看进度 →</button>':'<button class="secondary" data-apply="'+esc(l.request_id)+'" '+(!a.canApply?'disabled':'')+' >'+(a.route==='automatic'?'自助补额度':'提交审批')+'</button>')+'</div></article>';}).join('')+'</div></details>';}).join('');
   if(!admin){
     const meta=await refundMeta();if(s.user!==owner||s.page!==page)return;
-    $('#content').innerHTML=refundHeader(meta.overview,true)+'<section class="refund-candidates"><div class="refund-history-heading"><h3>可补额度与模型</h3><span>当前查询页</span></div><div class="preview-summary"><div><small>可补额度</small><strong class="amount">'+money(expected)+' </strong></div><div><small>涉及模型</small><strong>'+new Set(available.map(v=>v.log.model_name)).size+'</strong></div><div><small>可申请记录</small><strong>'+available.length+' <em>笔</em></strong></div></div><div class="selection-bar"><label class="check-label"><input type="checkbox" id="select-page">全选本页可申请记录</label><span id="selection-summary" role="status" aria-live="polite"></span><button class="primary" id="batch-apply" disabled>自助补额度</button></div>'+grouped+'<details class="filter-disclosure"><summary>筛选条件</summary>'+toolbar+'</details>'+pager(data.total,shown.length)+'</section>'+skippedModelsMarkup(data)+refundRecordsMarkup(meta.records);
+    $('#content').innerHTML=refundHeader(meta.overview,true)+'<section class="refund-candidates"><div class="refund-history-heading"><h3>可补额度与模型</h3><span>当前查询页</span></div><div class="preview-summary"><div><small>可补额度</small><strong class="amount">'+money(expected)+' </strong></div><div><small>涉及模型</small><strong>'+new Set(available.map(v=>v.log.model_name)).size+'</strong></div><div><small>可申请记录</small><strong>'+available.length+' <em>笔</em></strong></div></div><div class="selection-bar"><label class="check-label"><input type="checkbox" id="select-page">全选本页可申请记录</label><span id="selection-summary" role="status" aria-live="polite"></span><button class="primary" id="batch-apply" disabled>自助补额度</button></div>'+grouped+pager(data.total,shown.length)+'</section>'+skippedModelsMarkup(data)+refundRecordsMarkup(meta.records);
+    const results=$('.refund-candidates');
+    if(!shown.length)results.querySelector('.selection-bar').insertAdjacentHTML('afterend',empty('已查询的有效期内暂无符合补偿规则的记录'));
+    const progress=data.queryProgress;
+    if(progress)results.insertAdjacentHTML('beforeend','<div class="query-progress" role="status"><strong>已成功查询至 '+esc(date(progress.end*1000))+'</strong><span>'+(progress.scanned?'本次扫描 '+esc(date(progress.from*1000))+' 至 '+esc(date(progress.end*1000))+' · 新发现 '+num(progress.added)+' 笔消费':'当前显示已保存的查询结果')+'</span><p>再次查询仅接续新增时间，已发现且未补偿的有效记录继续保留；翻页不重复查询。已覆盖时段不再回扫，原站延迟写入该时段的日志不会补查。</p></div>');
     currentLogs=shown;available.forEach(v=>selectedLogs.add(v.log.request_id));updateLogSelection();icons();return;
   }
   $('#content').innerHTML='<div class="scope-strip"><span class="site-pill"><i></i>当前 云中猫API小站 实例</span><span class="scope-caption">单实例 · 原站身份 · 异常审批</span></div><section class="panel refund-controls"><div><span class="badge neutral">本页查询预览</span><p>符合条件的消费自助返还，异常记录转审批。</p></div><div class="action-row"><button class="secondary" id="query-empty">'+icon('search')+' 查询空回</button><button class="primary" id="batch-apply" disabled>自助补额度</button></div></section><details class="filter-disclosure"><summary>筛选条件 <span>模型、请求标识与时间范围</span></summary>'+toolbar+'</details><div class="preview-summary"><div><small>本页展示</small><strong>'+shown.length+' <em>笔</em></strong></div><div><small>符合申请条件</small><strong>'+available.length+' <em>笔</em></strong></div><div><small>预计返还 · 非到账</small><strong class="amount">'+money(expected)+' </strong></div></div><div class="selection-bar"><label class="check-label"><input type="checkbox" id="select-page">全选本页可申请记录</label><span id="selection-summary" role="status" aria-live="polite"></span></div>'+panel('模型汇总',grouped||empty(data.items.length?'本页无匹配日志，调整筛选或翻页继续查看':'本页没有消费记录'),'仅当前页 · '+groups.size+' 个模型；展开后勾选具体消费')+'<div class="notice">零输出仅是候选。缺乏证据须人工核实；订阅消费转站长审批，审核通过后补入钱包余额。金额按原站配置显示。本页无匹配不代表全部历史无候选。</div>'+pager(data.total,shown.length);
@@ -315,13 +324,26 @@ async function renderStatisticsDrill(){
   const d=adminDrill,data=await api('/api/admin/claims?'+new URLSearchParams({[d.key]:d.value,page:d.page}));
   $('#detail-body').innerHTML='<h3>'+esc(d.value)+' · 补偿明细</h3>'+table(['用户','模型','补偿额度','状态',''],data.items.map(c=>'<tr><td>'+esc(c.username)+'<span class="sub">ID '+c.user_id+'</span></td><td>'+esc(c.log.model_name)+'</td><td>'+money(c.amount)+'</td><td>'+badge(c.status)+'</td><td><button class="ghost" data-detail="'+c.id+'">申请详情</button></td></tr>'))+'<div class="pagination"><span>共 '+data.total+' 笔</span><div><button class="ghost" data-drill-turn="-1" '+(d.page<=1?'disabled':'')+'>上一页</button><span>'+d.page+'</span><button class="ghost" data-drill-turn="1" '+(d.page*30>=data.total?'disabled':'')+'>下一页</button></div></div>';icons();
 }
+function syncInboxBadge(unread){
+  const badge=$('#inbox-badge');badge.hidden=!unread;badge.textContent=unread>99?'99+':String(unread);
+  $('#inbox-toggle').setAttribute('aria-label','站内通知'+(unread?'，'+unread+' 条未读':''));
+}
+async function refreshInboxBadge(){const data=await api('/api/inbox');syncInboxBadge(data.unread);}
+async function inbox(){
+  const data=await api('/api/inbox?page='+s.n+(inboxUnreadOnly?'&unread=1':''));
+  if(!data.items.length&&s.n>1){s.n=Math.max(1,Math.ceil(data.total/30));return inbox();}
+  syncInboxBadge(data.unread);
+  $('#page-kicker').textContent='MY WORKSPACE';
+  $('#page-subtitle').textContent='查看申请审核、额度补偿与异常处理结果。';
+  $('#content').innerHTML=userInbox({data,unreadOnly:inboxUnreadOnly,esc,date,icon,badge,pager,empty});icons();
+}
 async function notifications(){
   const [n,r,e]=await Promise.all([api('/api/admin/notifications'),api('/api/admin/rules'),api('/api/admin/email-notifications')]);s.rules=r;
   $('#content').innerHTML=notificationCenter({n,r,e,esc,panel,table,empty,money,date,icon,eventNames,tab:notificationTab});
   $('#email-template-preview').innerHTML=emailPreview('approved',money,esc);
   icons();
 }
-async function audit(){const data=await api('/api/admin/audit');$('#content').innerHTML=panel('最近 100 条操作',data.length?table(['操作人','动作','关联申请','时间','详情'],data.map(v=>'<tr><td>#'+esc(v.actor_id)+'</td><td>'+esc(v.action)+'</td><td>'+esc(v.claim_id||'配置操作')+'</td><td>'+date(v.created_at)+'</td><td><details><summary>查看</summary><pre>'+esc(JSON.stringify(JSON.parse(v.detail),null,2))+'</pre></details></td></tr>')):empty('暂无操作记录'));}
+async function audit(){const data=await api('/api/admin/audit');$('#content').innerHTML=panel('最近 100 条操作',data.length?renderAuditLog(data,{formatQuota:money,date}):empty('暂无操作记录'),'按时间倒序 · 以下数量仅统计这 100 条记录');}
 function showOperation(title,body,op){operation=op;$('#operation-title').textContent=title;$('#operation-body').hidden=false;$('#operation-body').innerHTML=body;$('#operation-error').textContent='';$('#operation-results').replaceChildren();$('#operation-submit').hidden=false;$('#operation-submit').disabled=false;$('#operation-submit').textContent=op.kind==='apply'?(op.automatic?'确认核验并返还':'确认提交审批'):'确认处理';$('#operation-form .dialog-footer [data-close-operation]').textContent='取消';$('#detail-dialog').close();$('#operation-dialog').showModal();}
 const operationNote=(label,required=true)=>{if(s.page==='logs'){required=false;label='补充说明（选填）';}return '<label class="operation-note">'+label+'<textarea name="note" '+(required?'required':'')+' maxlength="2000" placeholder="'+(required?'填写核验依据':'补充说明（选填）')+'"></textarea></label>';};
 async function apply(ids){
@@ -371,20 +393,32 @@ async function submitOperation(form){
   button.hidden=true;operation=null;form.querySelectorAll('input,textarea').forEach(el=>el.disabled=true);
 }
 document.addEventListener('change',event=>{if(event.target.id==='ai-model-pick'&&event.target.value){const input=$('#ai-model');if(input)input.value=event.target.value;}});
+document.addEventListener('change',async event=>{if(event.target.id!=='inbox-unread-only')return;inboxUnreadOnly=event.target.checked;s.n=1;await render();});
 document.addEventListener('change',async event=>{
-  const input=event.target;if(input.name!=='aiEnabled')return;
-  if(s.busy){input.checked=Boolean(s.rules.aiEnabled);return;}
-  const previous=Boolean(s.rules.aiEnabled),message=$('#ai-config-message');
-  s.busy=true;input.disabled=true;message.className='field-help';message.textContent='正在保存 AI 审核开关…';
+  const input=event.target;if(!['aiEnabled','aiAutoThreshold','aiDailyLimit'].includes(input.name))return;
+  const controls=['aiEnabled','aiAutoThreshold','aiDailyLimit'].map(name=>$('[name='+name+']'));
+  const restore=()=>{if(input.name==='aiEnabled')input.checked=s.rules.aiEnabled;else input.value=s.rules[input.name];};
+  if(s.busy){restore();return;}
+  if(!input.checkValidity()){input.reportValidity();return;}
+  const message=$('#ai-config-message');
+  const payload={aiEnabled:controls[0].checked,aiAutoThreshold:Number(controls[1].value),aiDailyLimit:Number(controls[2].value),rulesVersion:s.rules.version};
+  s.busy=true;controls.forEach(el=>el.disabled=true);message.className='field-help';message.textContent='正在保存 AI 判定规则…';
+  aiSettingsSave=api('/api/admin/ai-settings','PUT',payload);
   try{
-    const saved=await api('/api/admin/ai-settings','PUT',{aiEnabled:input.checked,rulesVersion:s.rules.version});
-    Object.assign(s.rules,{version:saved.rulesVersion,aiEnabled:saved.aiEnabled});
+    const saved=await aiSettingsSave;
+    Object.assign(s.rules,{version:saved.rulesVersion,aiEnabled:saved.aiEnabled,aiAutoThreshold:saved.aiAutoThreshold,aiDailyLimit:saved.aiDailyLimit});
     if(aiConfig)Object.assign(aiConfig,saved);
-    message.className='field-help success-text';message.textContent=saved.aiEnabled?'AI 辅助审核已开启并保存。':'AI 辅助审核已关闭并保存。';
-  }catch(error){input.checked=previous;message.className='field-help error';message.textContent=error.message;toast(error.message);}
-  finally{input.disabled=false;s.busy=false;}
+    message.className='field-help success-text';message.textContent='已自动保存 · AI '+(saved.aiEnabled?'已开启':'已关闭')+' · 自动通过阈值 '+saved.aiAutoThreshold+'% · 每日 '+saved.aiDailyLimit+' 次';
+  }catch(error){restore();message.className='field-help error';message.textContent=error.message;toast(error.message);}
+  finally{aiSettingsSave=null;controls.forEach(el=>el.disabled=false);s.busy=false;}
 });
-document.addEventListener('click',async event=>{const b=event.target.closest('button');if(!b||s.busy)return;busyButton(b,true);try{
+document.addEventListener('click',async event=>{const b=event.target.closest('button');if(!b)return;if(aiSettingsSave){try{await aiSettingsSave;}catch{return;}}if(s.busy)return;busyButton(b,true);try{
+  if(b.dataset.inboxRead||b.dataset.inboxOpen||b.id==='inbox-read-all'){
+    s.busy=true;
+    const payload=b.id==='inbox-read-all'?{throughId:Number(b.dataset.throughId)}:{id:Number(b.dataset.inboxRead||b.dataset.inboxOpen)};
+    const result=await api('/api/inbox/read','POST',payload);syncInboxBadge(result.unread);
+    await inbox();if(b.dataset.inboxOpen)await detail(b.dataset.claimId);return;
+  }
   if(['ai-fetch-models','ai-test-config','ai-save-config'].includes(b.id)){
     const message=$('#ai-config-message'),payload={baseUrl:$('#ai-base-url')?.value.trim(),model:$('#ai-model')?.value.trim(),prompt:$('#ai-prompt')?.value.trim(),apiKey:$('#ai-api-key')?.value,timeoutMs:Number($('#ai-timeout')?.value||15000)};
     Object.assign(payload,{aiEnabled:$('[name=aiEnabled]').checked,aiAutoThreshold:Number($('[name=aiAutoThreshold]').value),aiDailyLimit:Number($('[name=aiDailyLimit]').value),rulesVersion:s.rules.version});
@@ -472,7 +506,7 @@ document.addEventListener('click',async event=>{const b=event.target.closest('bu
   if(b.id==='account-logout'){$('#logout').click();return;}
   if(b.id==='theme-toggle'){document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark';try{localStorage.setItem('huixiang-theme',document.documentElement.dataset.theme);}catch{}theme();return;}
   if(b.hasAttribute('data-close-operation')){$('#operation-dialog').close();operation=null;return;}
-  if(b.id==='query-empty'){s.busy=true;b.disabled=true;b.textContent='正在查询…';refundQueried=true;await logs();return;}
+  if(b.id==='query-empty'||(b.id==='refresh'&&s.page==='logs'&&refundQueried)){const original=b.innerHTML;s.busy=true;b.disabled=true;b.textContent='正在查询…';refundQueried=true;s.n=1;try{await logs({refresh:true});}finally{if(b.isConnected){b.disabled=false;b.innerHTML=original;icons();}}return;}
   if(b.dataset.turn){s.n+=Number(b.dataset.turn);await render();}else if(b.dataset.detail)await detail(b.dataset.detail);else if(b.dataset.apply){s.busy=true;await apply([b.dataset.apply]);}else if(b.id==='batch-apply'){s.busy=true;await apply([...new Set([...document.querySelectorAll('[name="log-select"]:checked,[name="mobile-log-select"]:checked')].map(v=>v.value))]);}else if(b.dataset.action){s.busy=true;await action(b.dataset.action,[b.dataset.id]);}else if(b.dataset.batch){s.busy=true;await action(b.dataset.batch,[...document.querySelectorAll('[name="claim-select"]:checked')].map(v=>v.value));}else if(b.dataset.stats){statKind=b.dataset.stats;s.n=1;await stats();}else if(b.id==='refresh')await render();else if(b.id==='close-dialog')$('#detail-dialog').close();else if(b.id==='logout'){await api('/api/auth/logout','POST',{});loginView();}else if(b.id==='test-notification'){await api('/api/admin/notifications/test','POST',{});toast('测试已入队，刷新查看发送结果');}
 }catch(e){toast(e.message);}finally{s.busy=false;busyButton(b,false);if(b.id==='query-empty'&&b.isConnected){b.disabled=false;b.textContent='查询空回';}}});
 
@@ -537,7 +571,7 @@ document.addEventListener('submit',async event=>{
       else data=await api('/api/auth/verify','POST',{challengeId:s.challenge,code:f.get('code')});
       if(data.requireVerification){s.challenge=data.challengeId;$('#login-form').hidden=true;$('#verify-form').hidden=false;toast('原站要求二次验证，输入动态验证码。Passkey 等方式尚未接入。');}
       else{$('#verify-form').reset();$('#verify-form').hidden=true;$('#login-form').hidden=false;await enter(data);}
-    }else if(form.id==='log-filter'){for(const k of Object.keys(filters))if(f.has(k))filters[k]=f.get(k);s.n=1;await logs();}
+    }else if(form.id==='log-filter'){for(const k of Object.keys(filters))if(f.has(k))filters[k]=f.get(k);s.n=1;await logs({refresh:true});}
     else if(form.id==='claim-filter'){filters.status=f.get('status');s.n=1;await claims();}
     else if(form.id==='rules-form'){
       const r=structuredClone(s.rules),displayedQuotas={};for(const [k]of numeric){if(quotaFields.has(k))displayedQuotas[k]=String(f.get(k));else r[k]=Number(f.get(k));}for(const k of ['applicationsEnabled','executionEnabled','selfServiceEnabled','restrictModels','aiEnabled'])r[k]=f.has(k);for(const k of ['aiAutoThreshold','aiDailyLimit'])r[k]=Number(f.get(k));r.channels=f.getAll('channel-choice').map(Number);r.blockedUsers=String(f.get('blockedUsers')).split(/[,，\s]+/).filter(Boolean).map(Number);r.models=[...pickedModels];r.excludedModels=[...excludedModels.values()];r.userGroups=f.getAll('group-choice');r.timezone=f.get('timezone');r.dailyResetTime=f.get('dailyResetTime');r.notifications.enabled=f.has('notificationsEnabled');await api('/api/admin/rules','PUT',{...r,lookbackDays:Number(f.get('lookbackDays')),displayedQuotas,displayRevision:s.display?.revision});toast('规则已保存并记录新版本');await rules();
@@ -569,5 +603,6 @@ async function loadBrand(){
 }
 loadBrand();
 pages.notifications='通知中心';
+pages.inbox='站内通知';iconNames.inbox='bell';
 watchUIVersion({isBusy:()=>s.busy||api.pending>0,notify:toast});
 try{await enter(await api('/api/me'));}catch{loginView();}

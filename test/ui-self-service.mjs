@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {log} from './helpers.mjs';
 const require=createRequire(import.meta.url),{chromium}=require(process.env.PLAYWRIGHT_MODULE_PATH);
 const fixture=await import('./preview.mjs');
+let queryNow=Date.now();fixture.service.logQueries.clock=()=>queryNow;
 const browser=await chromium.launch({headless:true,channel:process.env.PLAYWRIGHT_CHANNEL||'msedge'});
 const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];
 page.on('pageerror',error=>errors.push(error.message));mkdirSync('test-results',{recursive:true});
@@ -22,7 +23,7 @@ try{
   await page.locator('#operation-results').getByText('补偿成功',{exact:true}).waitFor();await page.locator('#operation-results').getByText('待审核',{exact:true}).waitFor();
   await page.screenshot({path:'test-results/self-service-results.png',fullPage:true});await page.locator('[data-close-operation]').last().click();
   // Simulate a lost response AFTER the server credited: UI must not offer blind replay.
-  fixture.remote.data.logs.push(log('fixture-network',{quota:60}));await page.locator('#refresh').click();await page.locator('.model-group>summary').first().click();await page.locator('.desktop-log-details [data-apply="fixture-network"]').click();
+  fixture.remote.data.logs.push(log('fixture-network',{quota:60,created_at:Math.floor(queryNow/1000)+1}));queryNow+=2000;await page.locator('#refresh').click();await page.locator('.model-group>summary').first().click();await page.locator('.desktop-log-details [data-apply="fixture-network"]').click();
   assert.equal(await page.locator('#operation-form [name=note]').getAttribute('required'),null);
   await page.route('**/api/claims',async route=>{if(route.request().method()==='POST'){await route.fetch();await route.abort('failed');}else await route.continue();});
   await page.locator('#operation-submit').click();await page.locator('#operation-error').filter({hasText:'请求未确认'}).waitFor();assert.equal(await page.locator('#operation-submit').isVisible(),false);

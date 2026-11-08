@@ -51,22 +51,29 @@ export class Compensation {
         entry.count++; skipped.set(log.model_name, entry);
         return false;
       });
-      const page = query.page || 1;
-      data = { items: visible.slice((page - 1) * 30, page * 30), total: visible.length, page, syncedAt: snapshot.syncedAt };
+      const { end, from, added, coverageStart, scanned } = snapshot;
+      data = { items: visible, total: visible.length, page: query.page || 1, syncedAt: snapshot.syncedAt, queryProgress: {end,from,added,coverageStart,scanned} };
     }
     r=await this.ruleContext(data.items);
-    const items = data.items.map(log => {
+    const usage = new Map();
+    let items = data.items.map(log => {
       const assessment = assessLog(log, { id: log.user_id }, r);
       const c = log.request_id ? this.store.byRequest(log.request_id) : null;
       const reasons = [...assessment.reasons];
       if (!r.applicationsEnabled) reasons.push('申请暂未开放');
       if (!isOpen(r, Date.now())) reasons.push('不在每日申请开放时段');
-      const day = this.store.overview(log.user_id);
+      if (!usage.has(log.user_id)) usage.set(log.user_id, this.store.overview(log.user_id));
+      const day = usage.get(log.user_id);
       if (day.today.count >= r.userDailyCount || day.today.quota + assessment.expectedQuota > r.userDailyQuota || day.siteToday.count >= r.siteDailyCount || day.siteToday.quota + assessment.expectedQuota > r.siteDailyQuota) reasons.push('当日额度或次数不足');
       if (c) reasons.push('已有申请，查看处理进度');
       const decision=selfServiceDecision(log,{id:log.user_id},r);
       return { log: admin ? log : publicLog(log), assessment: { ...assessment, reasons, canApply: assessment.eligible && reasons.length === 0, route:decision.automatic?'automatic':'review', reviewReasons:decision.reasons }, claim: c ? { id: c.id, status: c.status } : null };
     });
+    if (!admin) {
+      items = items.filter(item => query.view === 'eligible' ? item.assessment.eligible : query.view === 'pending' ? item.assessment.candidate && item.assessment.evidence !== 'empty_marked' : true);
+      data.total = items.length;
+      items = items.slice((data.page - 1) * 30, data.page * 30);
+    }
     return { ...data, items, skippedModels: [...skipped.values()].sort((a,b)=>a.model.localeCompare(b.model)), skippedCount: [...skipped.values()].reduce((sum,entry)=>sum+entry.count,0) };
   }
   async apply(user, requestId, reason, manual = false, selfService = false, runId = null) {

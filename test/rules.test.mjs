@@ -47,3 +47,12 @@ test('自助判定仅允许稳定、明确空回的余额消费，异常转审�
   for(const change of [{selfServiceEnabled:false},{executionEnabled:false},{selfServiceMaxQuota:100}])assert.equal(selfServiceDecision(base,user,rules(change),now).automatic,false);
   for(const change of [{selfServiceMinAgeSeconds:0},{selfServiceMinAgeSeconds:29},{selfServiceMaxQuota:0},{selfServiceEnabled:'true'}])assert.throws(()=>validateRules(rules(change)));
 });
+
+test('AI 门槛覆盖原空回标记，关闭后恢复原判定，阈值边界精确生效',()=>{
+  const now=Date.now(),source=log('ai-gate',{created_at:Math.floor(now/1000)-120});
+  const current=rules({aiEnabled:true,aiAutoThreshold:95});
+  for(const review of [null,{status:'fallback',decision:'uncertain',confidence:0},{status:'failed',decision:'empty',confidence:1},{status:'completed',decision:'not_empty',confidence:1},{status:'completed',decision:'uncertain',confidence:1},{status:'completed',decision:'empty',confidence:.9499}])assert.equal(selfServiceDecision(source,user,current,now,review).automatic,false);
+  assert.equal(selfServiceDecision(source,user,current,now,{status:'completed',decision:'empty',confidence:.95}).automatic,true);
+  assert.equal(selfServiceDecision(source,user,{...current,aiAutoThreshold:100},now,{status:'completed',decision:'empty',confidence:1}).automatic,true);
+  assert.equal(selfServiceDecision(source,user,{...current,aiEnabled:false},now,null).automatic,true);
+});

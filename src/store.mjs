@@ -16,7 +16,11 @@ export class Store {
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, claim_id TEXT, actor_id INTEGER NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY, event TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, result TEXT, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS email_notifications (id INTEGER PRIMARY KEY, event TEXT NOT NULL, recipient TEXT, body TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, result TEXT, dedupe_key TEXT UNIQUE, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS user_notifications (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, claim_id TEXT NOT NULL REFERENCES claims(id), status TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, dedupe_key TEXT NOT NULL UNIQUE, read_at INTEGER, created_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS user_notifications_owner ON user_notifications(user_id,id DESC);
+      CREATE INDEX IF NOT EXISTS user_notifications_unread ON user_notifications(user_id,read_at);
       CREATE TABLE IF NOT EXISTS log_query_cache (cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS log_query_progress (user_id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS ai_reviews (
         id TEXT PRIMARY KEY, request_id TEXT NOT NULL, user_id INTEGER NOT NULL,
         log_fingerprint TEXT NOT NULL, prompt_version TEXT NOT NULL,
@@ -38,7 +42,7 @@ export class Store {
       this.db.exec('ALTER TABLE notifications ADD COLUMN dedupe_key TEXT');
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS notifications_dedupe ON notifications(dedupe_key,status,created_at)');
-    this.db.exec('PRAGMA user_version=3');
+    this.db.exec('PRAGMA user_version=5');
     this.db.prepare('INSERT OR IGNORE INTO settings VALUES(1,?)').run(JSON.stringify(defaults));
     if(!this.db.prepare("SELECT 1 FROM metadata WHERE key='email_rejected_event_migrated'").get()){
       this.transaction(()=>{
@@ -52,7 +56,14 @@ export class Store {
       });
     }
     // A process may have died after the remote transfer: never replay it.
-    this.db.prepare("UPDATE claims SET status='unknown', updated_at=? WHERE status='executing'").run(Date.now());
+    const interrupted=this.db.prepare("SELECT id FROM claims WHERE status='executing'").all();
+    this.db.prepare("UPDATE claims SET status='unknown', review_note='服务重启后无法确认到账结果，等待管理员核对，禁止重复返还', updated_at=? WHERE status='executing'").run(Date.now());
+    this.transaction(()=>{
+      if(!this.db.prepare("SELECT 1 FROM metadata WHERE key='user_notifications_migrated'").get()){
+        for(const row of this.db.prepare('SELECT * FROM claims').iterate())this.notifyUserClaim(this.decode(row),'snapshot:'+row.id);
+        this.db.prepare("INSERT INTO metadata(key,value) VALUES('user_notifications_migrated','1')").run();
+      }else for(const {id} of interrupted){const claim=this.get(id);this.notifyUserClaim(claim,'recovery:'+id+':'+claim.updated_at);}
+    });
   }
   close() { this.db.close(); }
   storageInfo() {
@@ -130,7 +141,33 @@ export class Store {
     });
   }
   event(claimId, actor, action, detail = {}) {
-    this.db.prepare('INSERT INTO events(claim_id,actor_id,action,detail,created_at) VALUES(?,?,?,?,?)').run(claimId, actor, action, JSON.stringify(detail), Date.now());
+    return this.db.prepare('INSERT INTO events(claim_id,actor_id,action,detail,created_at) VALUES(?,?,?,?,?)').run(claimId, actor, action, JSON.stringify(detail), Date.now()).lastInsertRowid;
+  }
+  notifyUserClaim(claim,identity) {
+    const title={pending:'申请等待审核',approved:'申请审核通过',rejected:'申请审核未通过',succeeded:'额度补偿成功',failed:'额度补偿失败',unknown:'额度补偿待核对'}[claim.status];
+    if(!title)return;
+    const note={pending:'申请已进入人工审核队列。',approved:'审核已通过，等待执行补偿。',rejected:'本次申请未通过审核。',succeeded:'原站已确认补偿成功。',failed:'本次补偿未成功，请查看申请处理说明。',unknown:'到账结果尚未确认，正在等待管理员核对，请勿重复提交。'}[claim.status];
+    const body=String(claim.log.model_name||'未知模型')+' · '+(claim.review_note||note);
+    this.db.prepare('INSERT OR IGNORE INTO user_notifications(user_id,claim_id,status,title,body,dedupe_key,created_at) VALUES(?,?,?,?,?,?,?)').run(claim.user_id,claim.id,claim.status,title,body.slice(0,2400),String(identity),claim.updated_at);
+  }
+  inbox(userId,page=1,unreadOnly=false) {
+    const where='user_id=?'+(unreadOnly?' AND read_at IS NULL':'');
+    const total=this.db.prepare('SELECT COUNT(*) AS n FROM user_notifications WHERE '+where).get(userId).n;
+    const unread=this.db.prepare('SELECT COUNT(*) AS n FROM user_notifications WHERE user_id=? AND read_at IS NULL').get(userId).n;
+    const throughId=this.db.prepare('SELECT COALESCE(MAX(id),0) AS id FROM user_notifications WHERE user_id=?').get(userId).id;
+    const items=this.db.prepare('SELECT id,claim_id,status,title,body,read_at,created_at FROM user_notifications WHERE '+where+' ORDER BY id DESC LIMIT 30 OFFSET ?').all(userId,(page-1)*30);
+    return {items,total,unread,throughId,page};
+  }
+  readInbox(userId,{id,throughId}) {
+    if(id!==undefined){
+      if(!Number.isSafeInteger(id)||id<1)throw new AppError('通知标识无效');
+      if(!this.db.prepare('SELECT id FROM user_notifications WHERE id=? AND user_id=?').get(id,userId))throw new AppError('通知不存在',404);
+      this.db.prepare('UPDATE user_notifications SET read_at=? WHERE id=? AND user_id=? AND read_at IS NULL').run(Date.now(),id,userId);
+    }else{
+      if(!Number.isSafeInteger(throughId)||throughId<1)throw new AppError('通知范围无效');
+      this.db.prepare('UPDATE user_notifications SET read_at=? WHERE user_id=? AND id<=? AND read_at IS NULL').run(Date.now(),userId,throughId);
+    }
+    return {unread:this.db.prepare('SELECT COUNT(*) AS n FROM user_notifications WHERE user_id=? AND read_at IS NULL').get(userId).n};
   }
   notify(event, body, identity = null) {
     const n = this.rules().notifications;
@@ -175,9 +212,28 @@ export class Store {
   decode(row) { return row ? { ...row, log: JSON.parse(row.log), rules: JSON.parse(row.rules) } : null; }
   get(id) { return this.decode(this.db.prepare('SELECT * FROM claims WHERE id=?').get(id)); }
   byRequest(id) { return this.decode(this.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id)); }
+  auditEvents() {
+    return this.db.prepare(`SELECT e.*,c.username AS targetUsername,c.user_id AS targetUserId,c.request_id AS requestId,c.log AS claim_log,
+      CASE WHEN e.action='succeeded' THEN c.amount END AS amount,
+      (SELECT username FROM claims WHERE user_id=e.actor_id ORDER BY created_at DESC LIMIT 1) AS actorName
+      FROM events e LEFT JOIN claims c ON c.id=e.claim_id ORDER BY e.id DESC LIMIT 100`).all().map(row => {
+      const { claim_log, ...event } = row;
+      let model = null;
+      try { model = JSON.parse(claim_log || '{}').model_name || null; } catch {}
+      return { ...event, model };
+    });
+  }
   cachedLogQuery(key) {
     const row = this.db.prepare('SELECT payload FROM log_query_cache WHERE cache_key=?').get(key);
     return row ? JSON.parse(row.payload) : null;
+  }
+  logQueryProgress(userId) {
+    const row = this.db.prepare('SELECT payload FROM log_query_progress WHERE user_id=?').get(userId);
+    return row ? JSON.parse(row.payload) : null;
+  }
+  saveLogQueryProgress(userId, snapshot) {
+    // One row commits discovered logs and the successful cutoff together, outside disposable caches.
+    this.transaction(() => this.db.prepare('INSERT INTO log_query_progress(user_id,payload) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET payload=excluded.payload').run(userId, JSON.stringify(snapshot)));
   }
   cacheLogQuery(key, payload) {
     this.transaction(() => {
@@ -243,7 +299,8 @@ export class Store {
       const id = randomUUID(), now = Date.now();
       this.db.prepare("INSERT INTO claims(id,request_id,user_id,username,source,log,rules,reason,status,amount,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'pending',0,?,?)").run(id, log.request_id, user.id, user.username, source, JSON.stringify(log), JSON.stringify(rules), reason, now, now);
       if(runId)this.db.prepare('UPDATE claims SET run_id=? WHERE id=?').run(runId,id);
-      this.event(id, actor, 'application_created', { source, reason });
+      const eventId=this.event(id, actor, 'application_created', { source, reason });
+      this.notifyUserClaim(this.get(id),'event:'+eventId);
       if(notifyPending)this.notifyClaim('application_pending',this.get(id),'等待人工核实原消费');
       return this.get(id);
     });
@@ -272,8 +329,9 @@ export class Store {
       const c = this.get(id);
       if (!c || !from.includes(c.status)) throw new AppError('当前状态不允许此操作', 409);
       this.db.prepare('UPDATE claims SET status=?,operator_id=?,review_note=?,updated_at=? WHERE id=?').run(to, actor, note, Date.now(), id);
-      this.event(id, actor, to, { note, previousStatus: c.status });
+      const eventId=this.event(id, actor, to, { note, previousStatus: c.status });
       const updated=this.get(id);
+      if(c.status!==to)this.notifyUserClaim(updated,'event:'+eventId);
       if(!updated.run_id)this.notifyClaim(to === 'pending' ? 'application_pending' : to === 'succeeded' ? 'compensation_success' : to === 'unknown' ? 'execution_unknown' : to === 'failed' ? 'execution_failed' : 'review_result',updated,note);
       return this.get(id);
     });

@@ -35,7 +35,7 @@ if(process.env.PREVIEW_DEMO_DATA==='1'){
   store.transition(other.id,['executing'],'succeeded',1,'模拟返还完成');
 }
 export const previewOrigin='http://127.0.0.1:'+Number(process.env.PREVIEW_PORT||3211);
-export const {server}=createApplication({store,upstream:remote.upstream,origin:previewOrigin});
+export const {server,service}=createApplication({store,upstream:remote.upstream,origin:previewOrigin});
 await new Promise(r=>server.listen(Number(process.env.PREVIEW_PORT||3211),'127.0.0.1',r));
 console.log('LOCAL FIXTURE '+previewOrigin);
 for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{server.close();remote.server.close();store.close();process.exit(0);});

@@ -10,6 +10,49 @@ async function setup(t){const remote=await mockServer();const store=new Store();
   const request=async(path,{method='GET',body,cookie,csrf,requestOrigin=origin}={})=>{const res=await fetch(base+path,{method,headers:{'Content-Type':'application/json',Origin:requestOrigin,...(cookie?{Cookie:cookie}:{}),...(csrf?{'X-CSRF-Token':csrf}:{})},body:body===undefined?undefined:JSON.stringify(body)});return {status:res.status,json:await res.json(),cookie:res.headers.get('set-cookie')};};
   const login=async who=>{const out=await request('/api/auth/login',{method:'POST',body:{username:who.username,password:'fixture-password'}});assert.equal(out.status,200);return {cookie:out.cookie.split(';')[0],csrf:out.json.data.csrf};};return {remote,store,server,base,request,login};}
 
+test('HTTP 秒级接续不重扫已覆盖时间，普通读取保留进度',async t=>{
+ const f=await setup(t),u=await f.login(user);f.remote.data.logs=[];
+ const first=(await f.request('/api/logs?view=eligible',u)).json.data;
+ assert.equal(first.total,0);
+ f.remote.data.logs.push(log('delayed-visible',{created_at:Math.floor(Date.now()/1000)-600}));
+ assert.equal((await f.request('/api/logs?view=eligible',u)).json.data.total,0);
+ // Set a known earlier successful cutoff instead of waiting for the wall clock.
+ const snapshot=f.store.logQueryProgress(user.id);snapshot.end-=2;f.store.saveLogQueryProgress(user.id,snapshot);
+ f.remote.data.logs.push(log('new-second',{id:101,created_at:snapshot.end+1}));
+ const fresh=await f.request('/api/logs?view=eligible&refresh=1',u);
+ assert.equal(fresh.status,200);assert.equal(fresh.json.data.total,1);
+ assert.equal(fresh.json.data.items[0].log.request_id,'new-second');
+ assert.equal(fresh.json.data.queryProgress.from,snapshot.end+1);
+ assert.equal((await f.request('/api/logs?page=2',u)).json.data.queryProgress.end,fresh.json.data.queryProgress.end);
+ assert.equal(f.remote.data.credits.length,0);
+});
+
+test('HTTP 操作记录只有管理员可读且包含可视化关联信息',async t=>{
+ const f=await setup(t),a=await f.login(admin),u=await f.login(user);
+ const c=f.store.create(log(),user,f.store.rules(),'测试操作记录','self',user.id);
+ f.store.event(c.id,admin.id,'rejected',{note:'输出正常'});
+ assert.equal((await f.request('/api/admin/audit',u)).status,403);
+ const e=(await f.request('/api/admin/audit',a)).json.data.find(e=>e.action==='rejected');
+ assert.equal(e.model,'fixture-model');assert.equal(e.targetUsername,user.username);assert.equal(e.actorName,admin.username);assert.equal(e.requestId,c.request_id);
+ assert.ok(!Object.hasOwn(e,'claim_log'));
+});
+
+test('HTTP 按完整结果筛选再分页，候选和全部消费视图各自计数',async t=>{
+ const f=await setup(t),u=await f.login(user),now=Math.floor(Date.now()/1000);
+ f.remote.data.logs=[...Array.from({length:30},(_,i)=>log('normal-'+i,{id:i+1,created_at:now-i,completion_tokens:100})),...Array.from({length:31},(_,i)=>log('empty-'+i,{id:i+100,created_at:now-100-i})),log('uncertain',{id:200,other:'{}',created_at:now-200})];
+ const first=(await f.request('/api/logs?view=eligible',u)).json.data;
+ assert.equal(first.total,32);assert.equal(first.items.length,30);
+ assert.ok(first.items.every(item=>item.assessment.eligible));
+ const second=(await f.request('/api/logs?view=eligible&page=2',u)).json.data;
+ assert.equal(second.total,32);assert.equal(second.items.length,2);
+ assert.equal(new Set([...first.items,...second.items].map(item=>item.log.request_id)).size,32);
+ const pending=(await f.request('/api/logs?view=pending',u)).json.data;
+ assert.equal(pending.total,1);assert.equal(pending.items[0].log.request_id,'uncertain');
+ assert.equal((await f.request('/api/logs?view=all',u)).json.data.total,62);
+ assert.equal((await f.request('/api/logs?view=invalid',u)).status,400);
+ assert.equal(f.remote.data.credits.length,0);
+});
+
 test('旧版原站 Cookie 登录不向浏览器泄漏上游 Cookie，撤销账号立即阻断',async t=>{
  const f=await setup(t);f.remote.data.legacyLogin=true;
  const response=await f.request('/api/auth/login',{method:'POST',body:{username:user.username,password:'fixture-password'}});

@@ -4,6 +4,24 @@ import { AIReviewer, logFingerprint } from '../src/ai-review.mjs';
 import { Store } from '../src/store.mjs';
 import { admin, log, rules, user, fixture } from './helpers.mjs';
 
+test('AI 启用后低于已保存阈值的空回不能被原规则绕过', async t => {
+  const f=fixture({rules:{aiEnabled:true}});t.after(()=>f.store.close());
+  f.store.saveAIConfig({baseUrl:'http://ai.test/v1',apiKey:'key',model:'fixture',aiAutoThreshold:95,rulesVersion:f.store.rules().version},admin.id);
+  f.service.ai=new AIReviewer({store:f.store,env:{AI_BASE_URL:'http://ai.test/v1',AI_API_KEY:'key',AI_MODEL:'fixture'},fetcher:async()=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({decision:'empty',confidence:.92,reason:'疑似空回',evidence:['输出为零']})}}]}))});
+  const result=await f.service.selfService(user,'fixture-request-1');
+  assert.equal(result.status,'pending');
+  assert.match(result.review_note,/95%/);
+  assert.equal(f.calls(),0);
+});
+
+test('调低 AI 阈值实际改变路由，未达 90% 的结果按保存值自动通过',async t=>{
+  const f=fixture({rules:{aiEnabled:true},logs:[log('lower-threshold',{other:JSON.stringify({billing_source:'wallet'})})]});t.after(()=>f.store.close());
+  f.store.saveAIConfig({baseUrl:'http://ai.test/v1',apiKey:'key',model:'fixture',aiAutoThreshold:80,rulesVersion:f.store.rules().version},admin.id);
+  f.service.ai=new AIReviewer({store:f.store,env:{AI_BASE_URL:'http://ai.test/v1',AI_API_KEY:'key',AI_MODEL:'fixture'},fetcher:async()=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({decision:'empty',confidence:.85,reason:'疑似空回',evidence:['输出为零']})}}]}))});
+  const result=await f.service.selfService(user,'lower-threshold');
+  assert.equal(result.status,'succeeded');assert.equal(f.calls(),1);
+});
+
 test('AI 判定按日志指纹幂等，重复调用不重复请求', async () => {
   const store = new Store();
   store.saveRules(rules({ aiEnabled: true }), admin.id, 1);

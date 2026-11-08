@@ -139,8 +139,11 @@ export function selfServiceDecision(log, user, rules, now = Date.now(), aiReview
   const reject=other.admin_info?.reject_reason||other.reject_reason;
   if(!rules.selfServiceEnabled)reasons.push('自助返还已暂停');
   if(!rules.executionEnabled)reasons.push('返还执行暂未开放');
-  const aiEmpty = rules.aiEnabled && aiReview?.decision === 'empty' && aiReview.confidence >= rules.aiAutoThreshold / 100;
-  if(!aiEmpty && (assessment.evidence!=='empty_marked'||!['gemini_empty_candidates','empty_response'].includes(reject)))reasons.push('缺少明确的上游空回证据');
+  if(rules.aiEnabled){
+    if(aiReview?.status!=='completed')reasons.push(aiReview?'AI 判定未成功完成，转人工审核':'等待 AI 判定');
+    else if(aiReview.decision!=='empty')reasons.push('AI 未确认空回，转人工审核');
+    else if(!Number.isFinite(aiReview.confidence)||aiReview.confidence<rules.aiAutoThreshold/100)reasons.push('AI 置信度未达到当前自动通过阈值 '+rules.aiAutoThreshold+'%，转人工审核');
+  }else if(assessment.evidence!=='empty_marked'||!['gemini_empty_candidates','empty_response'].includes(reject))reasons.push('缺少明确的上游空回证据');
   if(other.billing_source!=='wallet'&&fundingSource(log)!=='subscription')reasons.push('余额消费来源尚未确认');
   if((other.tool_calls&&(!Array.isArray(other.tool_calls)||other.tool_calls.length))||other.function_call||(other.tool_surcharges&&(!Array.isArray(other.tool_surcharges)||other.tool_surcharges.length))||other.image_output||other.audio_output||other.reasoning_tokens||other.thoughts_tokens)reasons.push('存在工具、多模态或推理输出，须人工核实');
   if(['refunded','refunded_quota','refund_quota','refund_amount','refund_status'].some(key=>other[key]!==undefined&&![false,0,'0','none','not_refunded'].includes(other[key])))reasons.push('存在退款或退款状态不明的标记');

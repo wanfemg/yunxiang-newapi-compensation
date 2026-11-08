@@ -17,7 +17,7 @@ import { normalizeAIBaseURL } from './ai-review.mjs';
 import {notificationMarkdown} from './notification-titles.mjs';
 
 const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
-const assetNames = ['app.js','style.css','glass.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','ui-version.js'];
+const assetNames = ['app.js','style.css','glass.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','user-inbox.js','audit-log.js','ui-version.js'];
 const assetContents = new Map(['index.html',...assetNames].map(name=>[name,readFileSync(join(publicDirectory,name))]));
 const uiVersion = createHash('sha256').update([...assetContents.values()].join('\0')).digest('hex').slice(0,16);
 const staticFiles = new Set(['/', ...assetNames.map(name=>'/'+name)]);
@@ -149,6 +149,8 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       if (path === '/api/me' && req.method === 'GET') return send({ user: cleanUser(user), csrf: session.csrf });
       if (path === '/api/auth/logout' && req.method === 'POST') { sessions.delete(key); res.setHeader('Set-Cookie', `${cookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? '; Secure' : ''}`); return send({}); }
       const admin = path.startsWith('/api/admin/'), base = path.replace('/api/admin/', '/api/');
+      if(path==='/api/inbox'&&req.method==='GET')return send(store.inbox(user.id,pageValue(url.searchParams.get('page')),url.searchParams.get('unread')==='1'));
+      if(path==='/api/inbox/read'&&req.method==='POST')return send(store.readInbox(user.id,await readBody(req)));
       if(path==='/api/display'&&req.method==='GET'){
         const display=await upstream.display();store.db.prepare("INSERT OR REPLACE INTO metadata(key,value) VALUES('display',?)").run(JSON.stringify(display));return send({...display,revision:digest(JSON.stringify(display))});
       }
@@ -200,6 +202,9 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       }
       if (base === '/api/logs' && req.method === 'GET') {
         const query = { page: pageValue(url.searchParams.get('page')), model: url.searchParams.get('model') || '', requestId: url.searchParams.get('requestId') || '', channel: url.searchParams.get('channel') || '', start: Number(url.searchParams.get('start')) || undefined, end: Number(url.searchParams.get('end')) || undefined };
+        query.refresh = url.searchParams.get('refresh') === '1';
+        query.view = url.searchParams.get('view') || 'all';
+        if (!['all', 'eligible', 'pending'].includes(query.view)) throw new AppError('日志展示范围无效');
         return send(await service.logs(user, query, admin));
       }
       if (base === '/api/claims' && req.method === 'GET') {
@@ -284,7 +289,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         return send(service.saveRules(user,body));
       }
       if (admin && base === '/api/stats' && req.method === 'GET') return send(store.adminStatistics(url.searchParams.get('kind') || 'users',pageValue(url.searchParams.get('page'))));
-      if (admin && base === '/api/audit' && req.method === 'GET') return send(store.db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT 100').all());
+      if (admin && base === '/api/audit' && req.method === 'GET') return send(store.auditEvents().map(event => ({...event,actorName:event.actor_id===user.id?user.username:event.actorName})));
       if (admin && base === '/api/notifications' && req.method === 'GET') return send({ config: dingTalk?.status() || { configured: false }, items: store.db.prepare('SELECT id,event,body,status,attempts,result,created_at FROM notifications ORDER BY id DESC LIMIT 100').all().map(({body,...row})=>({...row,title:notificationMarkdown({...row,body}).title})) });
       if (admin && base === '/api/notifications' && req.method === 'PUT') {
         if (!dingTalk) throw new AppError('通知存储不可用', 503);

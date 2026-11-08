@@ -1,9 +1,7 @@
 import { AppError } from './rules.mjs';
 
-const REUSE_MS = 15_000;
-const RECHECK_MS = 15 * 60_000;
-const OVERLAP_SECONDS = 300;
 const MAX_LOGS = 10_000;
+const rowKey = log => log.id === undefined ? JSON.stringify(log) : JSON.stringify([log.id, log.request_id]);
 
 // Query snapshots are only for discovery. Applying and paying always read upstream again.
 export class LogQueries {
@@ -15,45 +13,46 @@ export class LogQueries {
   }
   async read(user, query, hours) {
     const now = this.clock();
-    const requestedStart = query.start ?? Math.floor(now / 1000 - hours * 3600);
-    const start = Math.max(requestedStart, Math.floor(now / 1000 - hours * 3600));
-    const end = Math.min(query.end ?? Math.floor(now / 1000), Math.floor(now / 1000));
-    if (!Number.isSafeInteger(requestedStart) || requestedStart < 0 || !Number.isSafeInteger(end) || end < start) throw new AppError('消费时间范围无效');
-    const key = JSON.stringify([user.id, user.username, query.model || '', query.requestId || '', query.start ?? null, query.end ?? null, hours]);
-    if (!this.pending.has(key)) {
-      const job = this.sync(key, user, query, start, end, now);
-      this.pending.set(key, job);
-      job.finally(() => this.pending.delete(key)).catch(() => {});
-    }
-    const snapshot = await this.pending.get(key);
-    const items = snapshot.items.filter(log => log.user_id === user.id && log.created_at >= start && log.created_at <= end);
-    return { items, syncedAt: snapshot.syncedAt };
+    const end = Math.floor(now / 1000);
+    const start = Math.max(0, Math.floor(end - hours * 3600));
+    if (!Number.isFinite(hours) || hours <= 0 || !Number.isSafeInteger(end)) throw new AppError('消费时间范围无效');
+    // Capture the click time before waiting. Each later request scans only its remaining tail.
+    const previous = this.pending.get(user.id) || Promise.resolve();
+    const job = previous.catch(() => {}).then(() => this.sync(user, query, start, end, now));
+    this.pending.set(user.id, job);
+    try { return await job; }
+    finally { if (this.pending.get(user.id) === job) this.pending.delete(user.id); }
   }
-  async sync(key, user, query, start, end, now) {
-    const previous = this.store.cachedLogQuery(key);
-    if (previous && now >= previous.syncedAt && now - previous.syncedAt < REUSE_MS) return previous;
-    const full = !previous || now < previous.syncedAt || now - previous.fullAt >= RECHECK_MS;
-    const from = full ? start : Math.max(start, previous.end - OVERLAP_SECONDS);
+  async sync(user, query, start, end, now) {
+    const previous = this.store.logQueryProgress(user.id);
+    const visible = snapshot => ({ ...snapshot, items: snapshot.items.filter(log => log.user_id === user.id && log.created_at >= start && log.created_at <= end) });
+    if (previous && (!query.refresh || end <= previous.end)) return { ...visible(previous), scanned: false, added: 0 };
+    const from = previous ? Math.max(start, previous.end + 1) : start;
     const fetched = [];
+    const identities = new Set();
     let total = Infinity;
     for (let page = 1; fetched.length < total; page++) {
-      const data = await this.upstream.logs({ user, page, model: query.model || '', requestId: query.requestId || '', start: from, end });
-      if (!Array.isArray(data.items) || !Number.isSafeInteger(data.total) || data.total < 0 || data.total > MAX_LOGS) throw new AppError('日志数量过多或响应异常，请缩小消费时间范围', 409);
+      const data = await this.upstream.logs({ user, page, start: from, end });
+      if (!Array.isArray(data.items) || !Number.isSafeInteger(data.total) || data.total < 0 || data.total > MAX_LOGS) throw new AppError('日志数量过多或响应异常，请管理员调整查询天数；查询进度未推进', 409);
+      if (total !== Infinity && data.total !== total) throw new AppError('日志总数在同步中变化，请重试；查询进度未推进', 502);
       total = data.total;
-      if ((!data.items.length && fetched.length < total) || page > 1000) throw new AppError('日志同步不完整，请重试', 502);
+      if ((!data.items.length && fetched.length < total) || fetched.length + data.items.length > total || page > 1000) throw new AppError('日志同步不完整，请重试；查询进度未推进', 502);
+      for (const log of data.items) {
+        if (identities.has(rowKey(log))) throw new AppError('日志分页重复，请重试；查询进度未推进', 502);
+        identities.add(rowKey(log));
+      }
       fetched.push(...data.items);
     }
     // Keep distinct source rows even if request_id collides; payout rejects ambiguous IDs.
     const rows = new Map();
-    for (const log of [...(full ? [] : previous.items.filter(log => log.created_at < from)), ...fetched]) {
+    for (const log of [...(previous?.items || []), ...fetched]) {
       if (log.user_id !== user.id || log.created_at < start || log.created_at > end) continue;
-      const id = log.id === undefined ? JSON.stringify(log) : JSON.stringify([log.id, log.request_id]);
-      rows.set(id, log);
+      rows.set(rowKey(log), log);
     }
-    if (rows.size > MAX_LOGS) throw new AppError('日志数量过多，请缩小消费时间范围', 409);
+    if (rows.size > MAX_LOGS) throw new AppError('保留日志数量过多，请管理员调整查询天数；查询进度未推进', 409);
     const items = [...rows.values()].sort((a, b) => b.created_at - a.created_at || Number(b.id || 0) - Number(a.id || 0));
-    const snapshot = { items, end, syncedAt: now, fullAt: full ? now : previous.fullAt };
-    this.store.cacheLogQuery(key, snapshot);
-    return snapshot;
+    const snapshot = { items, end, syncedAt: now, from, added: fetched.filter(log => log.user_id === user.id && log.created_at >= from && log.created_at <= end).length, coverageStart: Math.max(start, previous?.coverageStart ?? start) };
+    this.store.saveLogQueryProgress(user.id, snapshot);
+    return { ...snapshot, scanned: true };
   }
 }
