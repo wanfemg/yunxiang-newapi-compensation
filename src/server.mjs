@@ -17,7 +17,7 @@ import { normalizeAIBaseURL } from './ai-review.mjs';
 import {notificationMarkdown} from './notification-titles.mjs';
 
 const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
-const assetNames = ['app.js','style.css','glass.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','user-inbox.js','audit-log.js','ui-version.js'];
+const assetNames = ['app.js','style.css','glass.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','user-inbox.js','audit-log.js','query-batches.js','ui-version.js'];
 const assetContents = new Map(['index.html',...assetNames].map(name=>[name,readFileSync(join(publicDirectory,name))]));
 const uiVersion = createHash('sha256').update([...assetContents.values()].join('\0')).digest('hex').slice(0,16);
 const staticFiles = new Set(['/', ...assetNames.map(name=>'/'+name)]);
@@ -211,13 +211,25 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         const data = store.list(admin ? null : user.id, url.searchParams.get('status') || '', pageValue(url.searchParams.get('page')),admin?Object.fromEntries(['owner','model','channel'].map(k=>[k,url.searchParams.get(k)||''])):{});
         return send({ ...data, items: data.items.map(c => service.view(c, admin)) });
       }
+      if(path==='/api/batches'&&req.method==='GET')return send(await service.batches.list(user));
+      const queryBatch=path.match(/^\/api\/batches\/([a-f0-9-]{36})(\/submit)?$/);
+      if(queryBatch&&req.method==='GET'&&!queryBatch[2])return send(await service.batches.view(user,queryBatch[1]));
+      if(queryBatch&&req.method==='POST'&&queryBatch[2]){
+        const body=await readBody(req),result=await service.batches.submit(user,queryBatch[1],body.reason||'申请整批核验空回补偿');
+        store.notifyClaimsBatch(result.id);
+        await queueEmails(store.batchClaims(result.id),user.id);
+        return send(result);
+      }
       if (base === '/api/claims' && req.method === 'POST') {
         const b = await readBody(req);
         if (!Array.isArray(b.requestIds) || !b.requestIds.length || b.requestIds.length > 30) throw new AppError('每批提交 1–30 条消费');
         const result = [],runId=randomUUID();
         for (const id of [...new Set(b.requestIds)]) { try { const claim=admin?await service.apply(user,id,b.reason,true,false,runId):await service.selfService(user,id,b.reason,runId);result.push({ requestId: id, success: true, status:claim.status, claim }); } catch (e) { result.push({ requestId: id, success: false, message: e instanceof AppError ? e.message : '处理失败' }); } }
+        const affected=result.filter(v=>v.success).map(v=>store.byRequest(v.requestId)).filter(Boolean);
+        const batchIds=new Set(affected.map(c=>c.batch_id).filter(Boolean));
         store.notifyClaimsBatch(runId);
-        await queueEmails(result.filter(v=>v.success).map(v=>store.byRequest(v.requestId)).filter(Boolean),user.id);
+        for(const id of batchIds)store.notifyClaimsBatch(id);
+        await queueEmails([...affected.filter(c=>!c.batch_id),...[...batchIds].flatMap(id=>store.batchClaims(id))],user.id);
         return send(result);
       }
       const assist=base.match(/^\/api\/claims\/([a-f0-9-]{36})\/ai-review$/);
@@ -226,7 +238,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       if(admin&&aiApprove&&req.method==='POST'){
         const result=await service.approveWithAI(user,aiApprove[1]);
         if(result.run_id)store.notifyClaimsBatch(result.run_id);
-        await queueEmails([result],user.id);
+        await queueEmails(result.batch_id?store.batchClaims(result.batch_id):[result],user.id);
         return send(service.view(result,true));
       }
       const detail = base.match(/^\/api\/claims\/([a-f0-9-]{36})$/);
@@ -250,10 +262,10 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
           try {
             let c,verified=item.verifiedAmount;
             if(item.displayedAmount!==undefined){try{verified=parseQuota(item.displayedAmount,display);}catch(error){throw new AppError(error.message);}}
-            if(b.action==='approve'&&fundingSource(service.claimFor(user,item.id).log)==='subscription')c=await service.approveSubscription(user,item.id,verified,item.note||b.note);
+            if(b.action==='approve'&&fundingSource(service.claimFor(user,item.id).log)==='subscription')c=await service.approveSubscription(user,item.id,verified,item.note||b.note,true);
             else if (b.action === 'approve' || b.action === 'reject') c = service.review(user, item.id, b.action, b.note);
             else if (b.action === 'execute') {
-              c = await service.execute(user, item.id, verified, item.note || b.note);
+              c = await service.execute(user, item.id, verified, item.note || b.note,true);
             }
             else if (b.action === 'reconcile') c = service.reconcile(user, item.id, item.outcome, item.note || b.note);
             else if (b.action === 'reopen') c = service.reopen(user, item.id, b.note);
@@ -261,13 +273,16 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
             result.push({ id: item.id, success: true, status: c.status });
           } catch (e) { result.push({ id: item.id, success: false, message: e instanceof AppError ? e.message : '处理失败，请检查服务端记录' }); }
         }
+        const batchIds=new Set(b.items.map(item=>store.get(item.id)?.batch_id).filter(Boolean));
+        if(['approve','reject','execute'].includes(b.action))for(const id of batchIds)await service.batches.settle(user,id);
+        for(const item of result)if(item.success)item.status=store.get(item.id).status;
         for(const runId of runIds)store.notifyClaimsBatch(runId);
-        await queueEmails(result.filter(v=>v.success).map(v=>store.get(v.id)).filter(Boolean),user.id);
+        await queueEmails([...result.filter(v=>v.success).map(v=>store.get(v.id)).filter(c=>c&&!c.batch_id),...[...batchIds].flatMap(id=>store.batchClaims(id))],user.id);
         return send(result);
       }
       if (base === '/api/rules' && req.method === 'GET') {
         const r = store.rules();
-        return send(admin ? r : { version: r.version, applicationsEnabled: r.applicationsEnabled, executionEnabled: r.executionEnabled, selfServiceEnabled:r.selfServiceEnabled,aiEnabled:r.aiEnabled,aiAutoThreshold:r.aiAutoThreshold,selfServiceMaxQuota:r.selfServiceMaxQuota,selfServiceMinAgeSeconds:r.selfServiceMinAgeSeconds,timezone: r.timezone, dailyResetTime:r.dailyResetTime, models: r.models,restrictModels:r.restrictModels, refundBasisPoints: r.refundBasisPoints, perRecordQuota: r.perRecordQuota, userDailyQuota: r.userDailyQuota, userDailyCount: r.userDailyCount, maxPending: r.maxPending, applicationHours: r.applicationHours, lookbackDays:Math.ceil(r.applicationHours/24), openStart: r.openStart, openEnd: r.openEnd, consumptionStart: null, consumptionEnd: null });
+        return send(admin ? r : { version: r.version, applicationsEnabled: r.applicationsEnabled, executionEnabled: r.executionEnabled, selfServiceEnabled:r.selfServiceEnabled,aiEnabled:r.aiEnabled,aiAutoThreshold:r.aiAutoThreshold,selfServiceMaxQuota:r.selfServiceMaxQuota,selfServiceMinAgeSeconds:r.selfServiceMinAgeSeconds,timezone: r.timezone, dailyResetTime:r.dailyResetTime, models: r.models,restrictModels:r.restrictModels, refundBasisPoints: r.refundBasisPoints, perRecordQuota: r.perRecordQuota, perBatchQuota:r.perBatchQuota, userDailyQuota: r.userDailyQuota, userDailyCount: r.userDailyCount, maxPending: r.maxPending, applicationHours: r.applicationHours, lookbackDays:Math.ceil(r.applicationHours/24), openStart: r.openStart, openEnd: r.openEnd, consumptionStart: null, consumptionEnd: null });
       }
       if (admin && base === '/api/rules' && req.method === 'PUT') {
         const body=await readBody(req);
@@ -275,7 +290,8 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
           const current=await upstream.display();
           if(body.displayRevision!==digest(JSON.stringify(current)))throw new AppError('原站额度显示设置已变化，请刷新规则页面后重新填写额度',409);
           if(body.displayedQuotas){
-            for(const key of ['perRecordQuota','selfServiceMaxQuota','userDailyQuota','siteDailyQuota']){
+            for(const key of ['perRecordQuota','perBatchQuota','selfServiceMaxQuota','userDailyQuota','siteDailyQuota']){
+              if(key==='perBatchQuota'&&!Object.hasOwn(body.displayedQuotas,key))continue;
               try{body[key]=parseQuota(body.displayedQuotas[key],current);}catch(e){throw new AppError(e.message);}
             }
           }

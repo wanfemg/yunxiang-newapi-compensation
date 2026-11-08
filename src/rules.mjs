@@ -5,7 +5,7 @@ export const defaults = {
   version: 1, applicationsEnabled: false, executionEnabled: false, selfServiceEnabled: true, selfServiceMaxQuota: 100000, selfServiceMinAgeSeconds: 60, timezone: 'Asia/Shanghai',
   channels: [], models: [], excludedModels: [], restrictModels:true, userGroups: [], blockedUsers: [], refundBasisPoints: 10000,
   aiEnabled: false, aiAutoThreshold: 90, aiDailyLimit: 30,
-  perRecordQuota: 0, userDailyQuota: 0, userDailyCount: 0, siteDailyQuota: 0, siteDailyCount: 0,
+  perRecordQuota: 0, perBatchQuota: 0, userDailyQuota: 0, userDailyCount: 0, siteDailyQuota: 0, siteDailyCount: 0,
   maxPending: 10, applicationHours: 72, consumptionStart: null, consumptionEnd: null,
   openStart: '00:00', openEnd: '00:00', dailyResetTime: '00:00',
   notifications: { enabled: false, events: ['application_pending', 'review_result', 'compensation_success', 'execution_failed', 'execution_unknown', 'ai_reviewing', 'ai_reviewed', 'ai_auto_compensation', 'ai_manual_review', 'batch_result'] },
@@ -19,6 +19,7 @@ export function positiveInt(value, label = '数值') {
 export function validateRules(input) {
   const r = structuredClone(input);
   r.dailyResetTime ??= defaults.dailyResetTime;
+  r.perBatchQuota ??= defaults.perBatchQuota;
   r.emailNotifications ??= structuredClone(defaults.emailNotifications);
   if (!Object.hasOwn(r, 'excludedModels')) r.excludedModels = [];
   for (const key of Object.keys(defaults)) if (!(key in r)) throw new AppError(`缺少规则：${key}`);
@@ -40,7 +41,7 @@ export function validateRules(input) {
     exclusions.set(JSON.stringify([rule.channelId, rule.model]), rule);
   }
   r.excludedModels = [...exclusions.values()];
-  for (const key of ['perRecordQuota', 'userDailyQuota', 'userDailyCount', 'siteDailyQuota', 'siteDailyCount']) {
+  for (const key of ['perRecordQuota', 'perBatchQuota', 'userDailyQuota', 'userDailyCount', 'siteDailyQuota', 'siteDailyCount']) {
     if (!Number.isSafeInteger(r[key]) || r[key] < 0 || r[key] > 1_000_000_000_000) throw new AppError(`${key}必须是非负安全整数`);
   }
   if (typeof r.aiEnabled !== 'boolean') throw new AppError('AI 判定开关必须为布尔值');

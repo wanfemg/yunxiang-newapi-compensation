@@ -36,6 +36,38 @@ test('HTTP 操作记录只有管理员可读且包含可视化关联信息',asyn
  assert.equal(e.model,'fixture-model');assert.equal(e.targetUsername,user.username);assert.equal(e.actorName,admin.username);assert.equal(e.requestId,c.request_id);
  assert.ok(!Object.hasOwn(e,'claim_log'));
 });
+test('HTTP 查询整批提交、跨模型合计增额、次数与通知去重',async t=>{
+ const f=await setup(t),u=await f.login(user),a=await f.login(admin);
+ f.store.saveRules({...f.store.rules(),models:['fixture-model','other-model'],userDailyCount:1,notifications:{enabled:true,events:['batch_result']}},admin.id,f.store.rules().version);
+ f.remote.data.channels=[{id:3,name:'测试渠道',status:1,models:'fixture-model,other-model'}];
+ f.remote.data.logs.push(log('batch-other',{id:101,quota:80,model_name:'other-model'}));
+ const queried=(await f.request('/api/logs?refresh=1',u)).json.data,batch=queried.batches[0];
+ assert.equal(batch.records,2);assert.equal(batch.models.length,2);
+ assert.equal((await f.request('/api/batches',u)).json.data.length,1);
+ const submitted=await f.request('/api/batches/'+batch.id+'/submit',{...u,method:'POST',body:{reason:'整批核实'}});
+ assert.equal(submitted.status,200);assert.equal(submitted.json.data.status,'succeeded');assert.equal(submitted.json.data.amount,200);
+ assert.deepEqual(f.remote.data.credits,[{id:7,action:'add_quota',mode:'add',value:200}]);
+ assert.equal(f.store.overview(user.id).today.count,1);
+ assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM notifications').get().n,1);
+ await f.request('/api/batches/'+batch.id+'/submit',{...u,method:'POST',body:{}});
+ assert.equal(f.remote.data.credits.length,1);assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM notifications').get().n,1);
+ const audit=(await f.request('/api/admin/audit',a)).json.data;
+ assert.ok(audit.some(e=>e.action==='batch_succeeded'&&e.batchId===batch.id&&e.amount===200));
+ const unowned={...user,id:8,username:'other'};const owned=f.store.queryBatch(batch.id);
+ f.store.insertQueryBatch({id:'00000000-0000-4000-8000-000000000008',user:unowned,from:owned.query_from,end:owned.query_end,items:[log('foreign',{user_id:8})]});
+ assert.equal((await f.request('/api/batches/00000000-0000-4000-8000-000000000008',u)).status,404);
+});
+test('HTTP 最后一条人工审核结束后整批只增额一次，订阅金额先逐笔核实',async t=>{
+ const f=await setup(t),u=await f.login(user),a=await f.login(admin);
+ f.remote.data.logs.push(log('subscription',{id:101,quota:80,other:JSON.stringify({billing_source:'subscription',subscription_id:1})}));
+ const batch=(await f.request('/api/logs?refresh=1',u)).json.data.batches[0];
+ const initial=(await f.request('/api/batches/'+batch.id+'/submit',{...u,method:'POST',body:{}})).json.data;
+ assert.equal(initial.status,'review');assert.equal(f.remote.data.credits.length,0);
+ const c=f.store.byRequest('subscription');
+ const out=await f.request('/api/admin/actions',{...a,method:'POST',body:{action:'approve',items:[{id:c.id,verifiedAmount:50}],note:'核实订阅未退款部分'}});
+ assert.equal(out.json.data[0].status,'succeeded');assert.equal(f.remote.data.credits.length,1);assert.equal(f.remote.data.credits[0].value,170);
+ assert.equal(f.store.overview(user.id).today.count,1);
+});
 
 test('HTTP 按完整结果筛选再分页，候选和全部消费视图各自计数',async t=>{
  const f=await setup(t),u=await f.login(user),now=Math.floor(Date.now()/1000);
@@ -175,8 +207,10 @@ test('真实 HTTP 适配闭环：原身份、申请、站长审核、额度返�
   f.remote.data.logs[0].other='{}';
   const logs=await f.request('/api/logs',u);assert.equal(logs.json.data.items[0].log.other,undefined);assert.equal(logs.json.data.items[0].assessment.canApply,true);
   const create=await f.request('/api/claims',{...u,method:'POST',body:{requestIds:['fixture-request-1'],reason:'无输出，申请核实'}});const id=create.json.data[0].claim.id;
-  await f.request('/api/admin/actions',{...a,method:'POST',body:{action:'approve',items:[{id}],note:'已核实无有效输出'}});
-  const execute=await f.request('/api/admin/actions',{...a,method:'POST',body:{action:'execute',items:[{id,verifiedAmount:120}],note:'核对流水，未退款'}});assert.equal(execute.json.data[0].status,'succeeded');assert.deepEqual(f.remote.data.credits,[{id:7,action:'add_quota',mode:'add',value:120}]);
+  const approved=await f.request('/api/admin/actions',{...a,method:'POST',body:{action:'approve',items:[{id}],note:'已核实无有效输出、未退款'}});
+  assert.equal(approved.json.data[0].status,'succeeded');assert.deepEqual(f.remote.data.credits,[{id:7,action:'add_quota',mode:'add',value:120}]);
+  const execute=await f.request('/api/admin/actions',{...a,method:'POST',body:{action:'execute',items:[{id,verifiedAmount:120}],note:'重复执行'}});
+  assert.equal(execute.json.data[0].success,false);assert.equal(f.remote.data.credits.length,1);
   const detail=await f.request('/api/claims/'+id,u);assert.equal(detail.json.data.status,'succeeded');assert.equal(detail.json.data.verification_note,undefined);
 });
 

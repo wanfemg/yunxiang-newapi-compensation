@@ -18,14 +18,15 @@ test('并发首查及服务重启复用持久结果，账号独立',async t=>{
 test('持久结果关联最新申请状态并排除已补偿，重复提交不重发',async t=>{
   const f=setup(t,[log('paid'),log('review',{id:101,other:'{}'}),log('available',{id:102})]);
   await f.service.logs(user,{});const paid=await f.service.selfService(user,'paid');await f.service.selfService(user,'review');
-  const out=await f.service.logs(user,{});assert.equal(out.total,2);assert.equal(out.items.find(v=>v.log.request_id==='review').claim.status,'pending');
+  const out=await f.service.logs(user,{});assert.equal(out.total,3);assert.equal(out.items.find(v=>v.log.request_id==='review').claim.status,'pending');
+  assert.equal(out.items.find(v=>v.log.request_id==='paid').claim.status,'approved','same-query pending review defers all payout');
   assert.equal((await f.service.selfService(user,'paid')).id,paid.id);assert.equal(f.calls.length,1);
 });
 test('相同请求不同源行保留，缺少标识不可申请；发放重新核验',async t=>{
   const f=setup(t,[log('collision',{id:1}),log('collision',{id:2}),log(undefined,{id:3,request_id:undefined})]);
   const out=await f.service.logs(user,{});assert.equal(out.total,3);assert.equal(out.items.find(v=>!v.log.request_id).assessment.canApply,false);
-  await assert.rejects(f.service.selfService(user,'collision'),/ambiguous/);assert.equal(f.store.overview().applications,0);
-  f.logs.splice(1);f.logs[0].quota=0;await assert.rejects(f.service.selfService(user,'collision'),/候选条件/);
+  await assert.rejects(f.service.selfService(user,'collision'),/重复原请求标识/);assert.equal(f.store.overview().applications,0);
+  f.logs.splice(1);f.logs[0].quota=0;await assert.rejects(f.service.selfService(user,'collision'),/重复原请求标识/);
 });
 function setup(t,items=[]){
   const f=fixture({logs:items});t.after(()=>f.store.close());

@@ -21,6 +21,13 @@ export class Store {
       CREATE INDEX IF NOT EXISTS user_notifications_unread ON user_notifications(user_id,read_at);
       CREATE TABLE IF NOT EXISTS log_query_cache (cache_key TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS log_query_progress (user_id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS compensation_batches (
+        id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, username TEXT NOT NULL,
+        query_from INTEGER NOT NULL, query_end INTEGER NOT NULL, logs TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open', note TEXT NOT NULL DEFAULT '',
+        amount INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS compensation_batches_owner ON compensation_batches(user_id,created_at);
       CREATE TABLE IF NOT EXISTS ai_reviews (
         id TEXT PRIMARY KEY, request_id TEXT NOT NULL, user_id INTEGER NOT NULL,
         log_fingerprint TEXT NOT NULL, prompt_version TEXT NOT NULL,
@@ -32,6 +39,8 @@ export class Store {
       CREATE INDEX IF NOT EXISTS ai_reviews_user_day ON ai_reviews(user_id, created_at);
     `);
     if(!this.db.prepare('PRAGMA table_info(claims)').all().some(c=>c.name==='run_id'))this.db.exec('ALTER TABLE claims ADD COLUMN run_id TEXT');
+    if(!this.db.prepare('PRAGMA table_info(claims)').all().some(c=>c.name==='batch_id'))this.db.exec('ALTER TABLE claims ADD COLUMN batch_id TEXT REFERENCES compensation_batches(id)');
+    if(!this.db.prepare('PRAGMA table_info(claims)').all().some(c=>c.name==='batch_auto'))this.db.exec('ALTER TABLE claims ADD COLUMN batch_auto INTEGER NOT NULL DEFAULT 0');
     if(!this.db.prepare('PRAGMA table_info(claims)').all().some(c=>c.name==='reserved_at')){
       this.db.exec(`ALTER TABLE claims ADD COLUMN reserved_at INTEGER;
         UPDATE claims SET reserved_at=COALESCE((SELECT MAX(created_at) FROM events WHERE claim_id=claims.id AND action='execution_reserved'),updated_at) WHERE execution_day IS NOT NULL`);
@@ -42,7 +51,8 @@ export class Store {
       this.db.exec('ALTER TABLE notifications ADD COLUMN dedupe_key TEXT');
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS notifications_dedupe ON notifications(dedupe_key,status,created_at)');
-    this.db.exec('PRAGMA user_version=5');
+    this.db.exec('CREATE INDEX IF NOT EXISTS claims_batch ON claims(batch_id)');
+    this.db.exec('PRAGMA user_version=6');
     this.db.prepare('INSERT OR IGNORE INTO settings VALUES(1,?)').run(JSON.stringify(defaults));
     if(!this.db.prepare("SELECT 1 FROM metadata WHERE key='email_rejected_event_migrated'").get()){
       this.transaction(()=>{
@@ -58,6 +68,19 @@ export class Store {
     // A process may have died after the remote transfer: never replay it.
     const interrupted=this.db.prepare("SELECT id FROM claims WHERE status='executing'").all();
     this.db.prepare("UPDATE claims SET status='unknown', review_note='服务重启后无法确认到账结果，等待管理员核对，禁止重复返还', updated_at=? WHERE status='executing'").run(Date.now());
+    this.db.prepare("UPDATE compensation_batches SET status='unknown',note='服务重启，整批到账待核对，禁止重复补偿',updated_at=? WHERE status='executing'").run(Date.now());
+    this.db.prepare("UPDATE compensation_batches SET status='review',note='审查中断，剩余记录转人工审核',updated_at=? WHERE status='judging'").run(Date.now());
+    // Existing paid claims keep their original ledger identity. Only discovered logs acquire a query batch.
+    this.transaction(() => {
+      for (const row of this.db.prepare('SELECT user_id,payload FROM log_query_progress').all()) {
+        const snapshot=JSON.parse(row.payload), items=snapshot.items.filter(log=>!log.query_batch_id);
+        if(!items.length)continue;
+        const id=randomUUID(),user={id:row.user_id,username:items[0].username||String(row.user_id)};
+        for(const log of items)log.query_batch_id=id;
+        this.insertQueryBatch({id,user,from:snapshot.coverageStart||snapshot.from,end:snapshot.end,items});
+        this.db.prepare('UPDATE log_query_progress SET payload=? WHERE user_id=?').run(JSON.stringify(snapshot),row.user_id);
+      }
+    });
     this.transaction(()=>{
       if(!this.db.prepare("SELECT 1 FROM metadata WHERE key='user_notifications_migrated'").get()){
         for(const row of this.db.prepare('SELECT * FROM claims').iterate())this.notifyUserClaim(this.decode(row),'snapshot:'+row.id);
@@ -213,14 +236,18 @@ export class Store {
   get(id) { return this.decode(this.db.prepare('SELECT * FROM claims WHERE id=?').get(id)); }
   byRequest(id) { return this.decode(this.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id)); }
   auditEvents() {
-    return this.db.prepare(`SELECT e.*,c.username AS targetUsername,c.user_id AS targetUserId,c.request_id AS requestId,c.log AS claim_log,
-      CASE WHEN e.action='succeeded' THEN c.amount END AS amount,
+    return this.db.prepare(`SELECT e.*,COALESCE(c.username,b.username) AS targetUsername,COALESCE(c.user_id,b.user_id) AS targetUserId,c.request_id AS requestId,c.log AS claim_log,
+      COALESCE(c.batch_id,b.id) AS batchId,
+      (SELECT json_group_array(DISTINCT json_extract(log,'$.model_name')) FROM claims WHERE batch_id=b.id) AS batchModels,
+      CASE WHEN e.action='succeeded' THEN c.amount WHEN e.action='batch_succeeded' THEN b.amount END AS amount,
       (SELECT username FROM claims WHERE user_id=e.actor_id ORDER BY created_at DESC LIMIT 1) AS actorName
-      FROM events e LEFT JOIN claims c ON c.id=e.claim_id ORDER BY e.id DESC LIMIT 100`).all().map(row => {
-      const { claim_log, ...event } = row;
+      FROM events e LEFT JOIN claims c ON c.id=e.claim_id
+      LEFT JOIN compensation_batches b ON b.id=COALESCE(c.batch_id,json_extract(e.detail,'$.batchId'))
+      ORDER BY e.id DESC LIMIT 100`).all().map(row => {
+      const { claim_log,batchModels, ...event } = row;
       let model = null;
       try { model = JSON.parse(claim_log || '{}').model_name || null; } catch {}
-      return { ...event, model };
+      return { ...event, model, models:JSON.parse(batchModels||'[]') };
     });
   }
   cachedLogQuery(key) {
@@ -231,9 +258,84 @@ export class Store {
     const row = this.db.prepare('SELECT payload FROM log_query_progress WHERE user_id=?').get(userId);
     return row ? JSON.parse(row.payload) : null;
   }
-  saveLogQueryProgress(userId, snapshot) {
+  saveLogQueryProgress(userId, snapshot, batch = null) {
     // One row commits discovered logs and the successful cutoff together, outside disposable caches.
-    this.transaction(() => this.db.prepare('INSERT INTO log_query_progress(user_id,payload) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET payload=excluded.payload').run(userId, JSON.stringify(snapshot)));
+    this.transaction(() => {
+      if(batch)this.insertQueryBatch(batch);
+      this.db.prepare('INSERT INTO log_query_progress(user_id,payload) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET payload=excluded.payload').run(userId, JSON.stringify(snapshot));
+    });
+  }
+  insertQueryBatch({id,user,from,end,items}) {
+    if(!items.length)return;
+    this.db.prepare('INSERT INTO compensation_batches(id,user_id,username,query_from,query_end,logs,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
+      .run(id,user.id,user.username,from,end,JSON.stringify(items),Date.now(),Date.now());
+  }
+  queryBatch(id) {
+    const row=this.db.prepare('SELECT * FROM compensation_batches WHERE id=?').get(id);
+    return row?{...row,logs:JSON.parse(row.logs)}:null;
+  }
+  batchClaims(id) { return this.db.prepare('SELECT * FROM claims WHERE batch_id=? ORDER BY created_at,id').all(id).map(row=>this.decode(row)); }
+  batchForRequest(userId,requestId) {
+    return this.db.prepare("SELECT b.id FROM compensation_batches b,json_each(b.logs) l WHERE b.user_id=? AND json_extract(l.value,'$.request_id')=? ORDER BY b.created_at LIMIT 1").get(userId,requestId)?.id;
+  }
+  updateBatch(id,status,note='',amount=null) {
+    this.db.prepare('UPDATE compensation_batches SET status=?,note=?,amount=COALESCE(?,amount),updated_at=? WHERE id=?').run(status,note,amount,Date.now(),id);
+    return this.queryBatch(id);
+  }
+  enrollBatch(id,logs,user,rules,reason,actor) {
+    return this.transaction(()=>{
+      const batch=this.queryBatch(id);
+      if(!batch||batch.status!=='open'||batch.user_id!==user.id)throw new AppError('本次查询已提交，请查看处理进度',409);
+      const pending=this.db.prepare("SELECT COUNT(DISTINCT COALESCE(batch_id,id)) AS n FROM claims WHERE user_id=? AND status IN ('pending','approved','executing','unknown')").get(user.id).n;
+      if(pending>=rules.maxPending)throw new AppError('待处理补偿次数已达上限',409);
+      for(const log of logs){
+        if(this.byRequest(log.request_id))continue;
+        const claimId=randomUUID(),now=Date.now();
+        this.db.prepare("INSERT INTO claims(id,request_id,user_id,username,source,log,rules,reason,status,amount,created_at,updated_at,run_id,batch_id) VALUES(?,?,?,?,?,?,?,?,'pending',0,?,?,?,?)")
+          .run(claimId,log.request_id,user.id,user.username,'self',JSON.stringify(log),JSON.stringify(rules),reason,now,now,id,id);
+        const eventId=this.event(claimId,actor,'application_created',{source:'self',reason,batchId:id});
+        this.notifyUserClaim(this.get(claimId),'event:'+eventId);
+      }
+      return this.updateBatch(id,'judging','正在逐条审查，全部完成后合并补偿');
+    });
+  }
+  reserveBatch(id,actor,entries,rules) {
+    return this.transaction(()=>{
+      const batch=this.queryBatch(id),claims=this.batchClaims(id);
+      if(!batch||!['review','judging'].includes(batch.status)||claims.some(c=>!['approved','rejected'].includes(c.status)))throw new AppError('整批尚未全部审核完成，不能补偿',409);
+      const approved=claims.filter(c=>c.status==='approved');
+      if(!approved.length||entries.length!==approved.length||new Set(entries.map(e=>e.id)).size!==approved.length||approved.some(c=>!entries.some(e=>e.id===c.id)))throw new AppError('补偿批次内容不完整',409);
+      const amount=entries.reduce((sum,e)=>sum+e.amount,0);
+      if(!Number.isSafeInteger(amount)||amount<=0)throw new AppError('整批补偿金额无效');
+      const caps=[rules.perBatchQuota,...approved.map(c=>c.rules.perBatchQuota)].filter(v=>v>0);
+      if(caps.length&&amount>Math.min(...caps))throw new AppError('整批应补额度超过单次补偿上限，请管理员核实，未执行补偿',409);
+      const now=Date.now(),day=settlementClock(now,rules).day,attempt=randomUUID();
+      for(const [owner,quota,count]of [[batch.user_id,rules.userDailyQuota,rules.userDailyCount],[null,rules.siteDailyQuota,rules.siteDailyCount]]){
+        const used=this.usage(day,owner);
+        if(used.quota+amount>quota||used.count+1>count)throw new AppError(`${owner===null?'全站':'用户'}当日额度或次数不足，整批已保留`,409);
+      }
+      for(const entry of entries){
+        if(!Number.isSafeInteger(entry.amount)||entry.amount<=0)throw new AppError('单条补偿额度无效');
+        this.db.prepare("UPDATE claims SET status='executing',amount=?,confirmed_unreturned=?,verification_note=?,operator_id=?,execution_day=?,attempt_id=?,updated_at=?,reserved_at=? WHERE id=?")
+          .run(entry.amount,entry.verifiedAmount,entry.note,actor,day,attempt,now,now,entry.id);
+        this.event(entry.id,actor,'execution_reserved',{batchId:id,amount:entry.amount,attempt,day});
+      }
+      this.event(null,actor,'batch_executing',{batchId:id,amount,records:entries.length});
+      return this.updateBatch(id,'executing','全部审核完成，正在合并补额度',amount);
+    });
+  }
+  finishBatch(id,status,actor,note) {
+    return this.transaction(()=>{
+      const batch=this.queryBatch(id);
+      if(!batch||!['executing','unknown'].includes(batch.status))throw new AppError('批次状态不允许此操作',409);
+      for(const claim of this.batchClaims(id).filter(c=>c.status===batch.status)){
+        this.db.prepare('UPDATE claims SET status=?,operator_id=?,review_note=?,updated_at=? WHERE id=?').run(status,actor,note,Date.now(),claim.id);
+        const eventId=this.event(claim.id,actor,status,{note,batchId:id,previousStatus:claim.status});
+        this.notifyUserClaim(this.get(claim.id),'event:'+eventId);
+      }
+      this.event(null,actor,'batch_'+status,{batchId:id,amount:batch.amount,note});
+      return this.updateBatch(id,status,note);
+    });
   }
   cacheLogQuery(key, payload) {
     this.transaction(() => {
@@ -294,7 +396,7 @@ export class Store {
   create(log, user, rules, reason, source, actor, notifyPending = true, runId = null) {
     return this.transaction(() => {
       if (this.byRequest(log.request_id)) throw new AppError('这笔消费已申请，请查看已有申请', 409);
-      const pending = this.db.prepare("SELECT COUNT(*) AS n FROM claims WHERE user_id=? AND status IN ('pending','approved','executing','unknown')").get(user.id).n;
+      const pending = this.db.prepare("SELECT COUNT(DISTINCT COALESCE(batch_id,id)) AS n FROM claims WHERE user_id=? AND status IN ('pending','approved','executing','unknown')").get(user.id).n;
       if (pending >= rules.maxPending) throw new AppError('待处理申请数量已达上限', 409);
       const id = randomUUID(), now = Date.now();
       this.db.prepare("INSERT INTO claims(id,request_id,user_id,username,source,log,rules,reason,status,amount,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'pending',0,?,?)").run(id, log.request_id, user.id, user.username, source, JSON.stringify(log), JSON.stringify(rules), reason, now, now);
@@ -307,12 +409,14 @@ export class Store {
   }
   usage(day, userId = null) {
     const owner = userId === null ? '' : ' AND user_id=?';
-    return this.db.prepare(`SELECT COALESCE(SUM(amount),0) AS quota, COUNT(*) AS count FROM claims WHERE execution_day=? AND status IN ('executing','unknown','succeeded')${owner}`).get(...(userId === null ? [day] : [day, userId]));
+    return this.db.prepare(`SELECT COALESCE(SUM(amount),0) AS quota, COUNT(DISTINCT COALESCE(batch_id,id)) AS count FROM claims WHERE execution_day=? AND status IN ('executing','unknown','succeeded')${owner}`).get(...(userId === null ? [day] : [day, userId]));
   }
   reserve(id, actor, amount, verifiedAmount, note, rules, now = Date.now()) {
     return this.transaction(() => {
       const c = this.get(id);
       if (!c || c.status !== 'approved') throw new AppError('申请状态已变化，不能执行', 409);
+      if(c.batch_id)throw new AppError('查询批次必须统一补额度，禁止逐条执行',409);
+      if(rules.perBatchQuota>0&&amount>rules.perBatchQuota)throw new AppError('应补额度超过单次补偿上限，未执行补偿',409);
       const day = settlementClock(now, rules).day;
       for (const [owner, quota, count] of [[c.user_id, rules.userDailyQuota, rules.userDailyCount], [null, rules.siteDailyQuota, rules.siteDailyCount]]) {
         const used = this.usage(day, owner);
@@ -348,7 +452,7 @@ export class Store {
     const anchor = Date.parse(today + 'T12:00:00Z');
     const trend = Array.from({length: days}, (_, i) => ({day: new Date(anchor - (days - 1 - i) * 86400000).toISOString().slice(0, 10), quota: 0, count: 0}));
     const range = [trend[0].day, today];
-    const rows = this.db.prepare("SELECT execution_day AS day, SUM(amount) AS quota, COUNT(*) AS count FROM claims WHERE user_id=? AND status='succeeded' AND execution_day BETWEEN ? AND ? GROUP BY execution_day").all(userId, ...range);
+    const rows = this.db.prepare("SELECT execution_day AS day, SUM(amount) AS quota, COUNT(DISTINCT COALESCE(batch_id,id)) AS count FROM claims WHERE user_id=? AND status='succeeded' AND execution_day BETWEEN ? AND ? GROUP BY execution_day").all(userId, ...range);
     const byDay = new Map(rows.map(row => [row.day, row]));
     for (const point of trend) Object.assign(point, byDay.get(point.day));
     return {days, timezone, site: '当前 云中猫API小站 实例', updatedAt: now, quota: rows.reduce((sum, row) => sum + row.quota, 0), count: rows.reduce((sum, row) => sum + row.count, 0), trend};

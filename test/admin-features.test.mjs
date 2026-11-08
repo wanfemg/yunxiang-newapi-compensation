@@ -74,7 +74,7 @@ test('删除模型可申请但强制人工审核，现存未选择模型仍拒�
     const claim=f.store.byRequest('retired');f.service.review(admin,claim.id,'approve','核实历史空回');
     assert.equal((await f.service.execute(admin,claim.id,120,'确认扣费未退款')).status,'succeeded');assert.equal(f.calls(),1);
     f.upstream.catalog=async()=>{throw Error('offline');};
-    assert.equal((await f.service.selfService(user,'active')).status,'pending');assert.equal(f.calls(),1);
+    assert.equal((await f.service.selfService(user,'active')).status,'succeeded');assert.equal(f.calls(),1,'same query settled both approved logs in one credit');
   }finally{f.store.close();}
 });
 

@@ -1,4 +1,5 @@
 import { AppError } from './rules.mjs';
+import { randomUUID } from 'node:crypto';
 
 const MAX_LOGS = 10_000;
 const rowKey = log => log.id === undefined ? JSON.stringify(log) : JSON.stringify([log.id, log.request_id]);
@@ -28,7 +29,7 @@ export class LogQueries {
     const visible = snapshot => ({ ...snapshot, items: snapshot.items.filter(log => log.user_id === user.id && log.created_at >= start && log.created_at <= end) });
     if (previous && (!query.refresh || end <= previous.end)) return { ...visible(previous), scanned: false, added: 0 };
     const from = previous ? Math.max(start, previous.end + 1) : start;
-    const fetched = [];
+    const fetched = [], batchId = randomUUID();
     const identities = new Set();
     let total = Infinity;
     for (let page = 1; fetched.length < total; page++) {
@@ -41,7 +42,7 @@ export class LogQueries {
         if (identities.has(rowKey(log))) throw new AppError('日志分页重复，请重试；查询进度未推进', 502);
         identities.add(rowKey(log));
       }
-      fetched.push(...data.items);
+      fetched.push(...data.items.map(log => ({ ...log, query_batch_id: batchId })));
     }
     // Keep distinct source rows even if request_id collides; payout rejects ambiguous IDs.
     const rows = new Map();
@@ -52,7 +53,7 @@ export class LogQueries {
     if (rows.size > MAX_LOGS) throw new AppError('保留日志数量过多，请管理员调整查询天数；查询进度未推进', 409);
     const items = [...rows.values()].sort((a, b) => b.created_at - a.created_at || Number(b.id || 0) - Number(a.id || 0));
     const snapshot = { items, end, syncedAt: now, from, added: fetched.filter(log => log.user_id === user.id && log.created_at >= from && log.created_at <= end).length, coverageStart: Math.max(start, previous?.coverageStart ?? start) };
-    this.store.saveLogQueryProgress(user.id, snapshot);
+    this.store.saveLogQueryProgress(user.id, snapshot, { id: batchId, user, from, end, items: fetched });
     return { ...snapshot, scanned: true };
   }
 }

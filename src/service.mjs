@@ -2,13 +2,14 @@ import { AppError, assessLog, expectedQuota, isOpen, publicLog, positiveInt, val
 import { UpstreamError } from './newapi.mjs';
 import { LogQueries } from './log-queries.mjs';
 import { AIReviewer, logFingerprint } from './ai-review.mjs';
+import { QueryBatches } from './query-batches.mjs';
 
 function text(value, label, max = 2000) {
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw new AppError(`${label}不能为空且不得超过 ${max} 字`);
   return value.trim();
 }
 export class Compensation {
-  constructor(store, upstream, clock = Date.now, ai = {}) { this.store = store; this.upstream = upstream; this.locks = new Set(); this.logQueries = new LogQueries(store, upstream, clock); this.ai = ai.reviewer || new AIReviewer({ store, now: clock }); }
+  constructor(store, upstream, clock = Date.now, ai = {}) { this.store = store; this.upstream = upstream; this.locks = new Set(); this.logQueries = new LogQueries(store, upstream, clock); this.ai = ai.reviewer || new AIReviewer({ store, now: clock }); this.batches = new QueryBatches(this); }
   requireAdmin(user) { if (user.role < 10) throw new AppError('需要站长管理权限', 403); }
   async ruleContext(logs){
     const rules=this.store.rules();
@@ -74,7 +75,7 @@ export class Compensation {
       data.total = items.length;
       items = items.slice((data.page - 1) * 30, data.page * 30);
     }
-    return { ...data, items, skippedModels: [...skipped.values()].sort((a,b)=>a.model.localeCompare(b.model)), skippedCount: [...skipped.values()].reduce((sum,entry)=>sum+entry.count,0) };
+    return { ...data, items, ...(!admin?{batches:await this.batches.list(user)}:{}), skippedModels: [...skipped.values()].sort((a,b)=>a.model.localeCompare(b.model)), skippedCount: [...skipped.values()].reduce((sum,entry)=>sum+entry.count,0) };
   }
   async apply(user, requestId, reason, manual = false, selfService = false, runId = null) {
     text(requestId, '请求标识', 200); reason = text(reason, '申请依据');
@@ -99,6 +100,11 @@ export class Compensation {
     note = text(note, '审核意见');
     if (!['approve', 'reject'].includes(action)) throw new AppError('审核动作无效');
     if(action==='approve'&&fundingSource(claim.log)==='subscription')throw new AppError('订阅转余额审批须确认核实金额并执行返还');
+    if(claim.batch_id){
+      const batch=this.store.queryBatch(claim.batch_id);
+      if(batch.status!=='review')throw new AppError('当前补偿批次已锁定，不能修改审核',409);
+      this.store.db.prepare('UPDATE claims SET batch_auto=0 WHERE id=?').run(id);
+    }
     return this.store.transition(id, ['pending'], action === 'approve' ? 'approved' : 'rejected', user.id, note);
   }
   async assistReview(user,id){
@@ -117,6 +123,7 @@ export class Compensation {
     this.requireAdmin(user);
     const claim=this.claimFor(user,id),rules=this.store.rules();
     if(claim.status!=='pending')throw new AppError('仅待审核申请可采纳 AI 建议并补额度',409);
+    if(claim.batch_id&&this.store.queryBatch(claim.batch_id)?.status!=='review')throw new AppError('整批正在处理中，请等待审查完成',409);
     if(fundingSource(claim.log)==='subscription')throw new AppError('订阅申请须逐笔核实未退款金额，请使用原审核流程');
     if(!this.ai.promptVersion)throw new AppError('AI 复核版本不可用，请重新执行 AI 辅助审核',409);
     const review=this.store.aiReview(claim.request_id,logFingerprint(claim.log),this.ai.promptVersion('admin'));
@@ -124,22 +131,33 @@ export class Compensation {
     if(review.analysis?.recommendation!=='approve'||review.decision!=='empty'||review.confidence*100<rules.aiAutoThreshold)throw new AppError('AI 建议不是高置信度通过，须由管理员按常规流程处理',409);
     const note=`管理员采纳 AI 二次复核建议并确认补偿：${review.analysis.summary}；${review.reason}`;
     this.store.transition(id,['pending'],'approved',user.id,note);
-    return this.#execute(user,id,expectedQuota(claim.log,claim.rules),note);
+    return this.execute(user,id,expectedQuota(claim.log,claim.rules),note);
   }
-  async approveSubscription(user,id,verifiedAmount,note){
+  async approveSubscription(user,id,verifiedAmount,note,deferBatch=false){
     this.requireAdmin(user);const claim=this.claimFor(user,id);
+    if(claim.batch_id&&this.store.queryBatch(claim.batch_id)?.status!=='review')throw new AppError('整批正在处理中，请等待审查完成',409);
     if(fundingSource(claim.log)!=='subscription')throw new AppError('不是订阅消费');
     positiveInt(verifiedAmount,'核实尚未返还额度');note=text(note,'订阅转余额核验依据');
     if(verifiedAmount>claim.log.quota)throw new AppError('已核实未返还额度不能超过原消费');
     this.store.transition(id,['pending'],'approved',user.id,'订阅转钱包余额审批通过：'+note);
-    return this.#execute(user,id,verifiedAmount,'订阅空回补入钱包余额：'+note);
+    return this.execute(user,id,verifiedAmount,'订阅空回补入钱包余额：'+note,deferBatch);
   }
-  async selfService(user, requestId, reason = '申请自助核验空回补偿', runId = null) {
+  async selfService(user, requestId, reason = '申请自助核验空回补偿', runId = null, prepared = false) {
     text(requestId,'请求标识',200);
     const existing=this.store.byRequest(requestId);
-    if(existing){if(existing.user_id!==user.id)throw new AppError('只能处理本人的消费',403);return this.view(existing);}
+    if(existing&&existing.user_id!==user.id)throw new AppError('只能处理本人的消费',403);
+    const queryBatch=!prepared&&(existing?.batch_id||this.store.batchForRequest(user.id,requestId));
+    if(queryBatch){
+      const batchLog=this.store.queryBatch(queryBatch)?.logs.find(log=>log.request_id===requestId);
+      if(batchLog&&modelExcluded(batchLog,this.store.rules()))throw new AppError('该模型不参与补偿，已跳过空回检测');
+      await this.batches.submit(user,queryBatch,reason);
+      const claim=this.store.byRequest(requestId);
+      if(!claim)throw new AppError('这条消费不符合本次补偿条件');
+      return this.view(claim);
+    }
+    if(existing&&!prepared)return this.view(existing);
     let created;
-    try{created=await this.apply(user,requestId,reason,false,true,runId);}catch(error){
+    try{created=prepared?existing:await this.apply(user,requestId,reason,false,true,runId);}catch(error){
       // Concurrent duplicate submissions return the same immutable application, never re-execute it.
       const current=this.store.byRequest(requestId);
       if(error.status===409&&current?.user_id===user.id)return this.view(current);
@@ -180,7 +198,9 @@ export class Compensation {
       return this.view(this.store.transition(claim.id,['pending'],'pending',user.id,'异常转审批：'+decision.reasons.join('；')));
     }
     try{
+      if(prepared)this.store.db.prepare('UPDATE claims SET batch_auto=1 WHERE id=?').run(claim.id);
       this.store.transition(claim.id,['pending'],'approved',user.id,'系统自助核验通过，待二次核验');
+      if(prepared)return this.view(this.store.get(claim.id));
       const result=await this.#execute(user,claim.id,claim.log.quota,'系统自助：空回证据、AI 判定、余额扣费、规则与限额核验',true);
       if(aiReview&&result.status==='succeeded')this.store.notifyClaim('ai_auto_compensation',result,`AI 高置信度判定为空回并已确认补额度。${aiReview.reason}`);
       return this.view(result);
@@ -191,8 +211,14 @@ export class Compensation {
       return this.view(current);
     }
   }
-  async execute(user, id, verifiedAmount, note) {
+  async execute(user, id, verifiedAmount, note, deferBatch = false) {
     this.requireAdmin(user);
+    const claim=this.claimFor(user,id);
+    if(claim.batch_id){
+      await this.batches.stage(user,claim,verifiedAmount,note);
+      if(!deferBatch)await this.batches.settle(user,claim.batch_id);
+      return this.store.get(id);
+    }
     return this.#execute(user,id,verifiedAmount,note);
   }
   async #execute(user, id, verifiedAmount, note, automatic = false) {
@@ -234,11 +260,34 @@ export class Compensation {
   reconcile(user, id, outcome, note) {
     this.requireAdmin(user); note = text(note, '对账凭据');
     if (!['received', 'not_received'].includes(outcome)) throw new AppError('核对结果无效');
+    const claim=this.claimFor(user,id);
+    if(claim.batch_id){
+      if(claim.status!=='unknown'||this.store.queryBatch(claim.batch_id)?.status!=='unknown')throw new AppError('仅到账待核对的整批允许对账',409);
+      this.store.finishBatch(claim.batch_id,outcome==='received'?'succeeded':'failed',user.id,'整批人工核对：'+note);
+      return this.store.get(id);
+    }
     return this.store.transition(id, ['unknown'], outcome === 'received' ? 'succeeded' : 'failed', user.id, `人工核对：${note}`);
   }
   reopen(user, id, note) {
     this.requireAdmin(user);
-    return this.store.transition(id, ['failed', 'rejected'], 'pending', user.id, text(note, '重新审核原因'));
+    note=text(note,'重新审核原因');
+    const claim=this.claimFor(user,id);
+    if(claim.batch_id){
+      const batch=this.store.queryBatch(claim.batch_id);
+      if(['executing','unknown','succeeded','judging'].includes(batch.status))throw new AppError('整批正在处理、待对账或已经补偿，不能重复补额度',409);
+      if(batch.status==='failed'){
+        this.store.transaction(()=>{
+          for(const item of this.store.batchClaims(batch.id).filter(c=>c.status==='failed')){
+            this.store.db.prepare("UPDATE claims SET status='pending',batch_auto=0,confirmed_unreturned=NULL,verification_note=NULL,review_note=?,updated_at=? WHERE id=?").run(text(note,'重新审核原因'),Date.now(),item.id);
+            this.store.event(item.id,user.id,'pending',{note:'整批重新审核：'+note});
+          }
+          this.store.updateBatch(batch.id,'review','整批重新审核，全部完成后统一补偿');
+        });
+        return this.store.get(id);
+      }
+      this.store.updateBatch(batch.id,'review','重新审核，全部完成后统一补偿');
+    }
+    return this.store.transition(id, claim.batch_id?['failed','rejected','approved']:['failed','rejected'], 'pending', user.id, note);
   }
   saveRules(user, body) {
     this.requireAdmin(user);
