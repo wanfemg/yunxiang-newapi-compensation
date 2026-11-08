@@ -241,7 +241,7 @@ export class Store {
     return this.db.prepare(`SELECT e.*,COALESCE(c.username,b.username) AS targetUsername,COALESCE(c.user_id,b.user_id) AS targetUserId,c.request_id AS requestId,c.log AS claim_log,
       COALESCE(c.batch_id,b.id) AS batchId,
       (SELECT json_group_array(DISTINCT json_extract(log,'$.model_name')) FROM claims WHERE batch_id=b.id) AS batchModels,
-      CASE WHEN e.action='succeeded' THEN c.amount WHEN e.action='batch_succeeded' THEN b.amount END AS amount,
+      CASE WHEN e.action='succeeded' THEN c.amount WHEN e.action='batch_succeeded' THEN json_extract(e.detail,'$.amount') END AS amount,
       (SELECT username FROM claims WHERE user_id=e.actor_id ORDER BY created_at DESC LIMIT 1) AS actorName
       FROM events e LEFT JOIN claims c ON c.id=e.claim_id
       LEFT JOIN compensation_batches b ON b.id=COALESCE(c.batch_id,json_extract(e.detail,'$.batchId'))
@@ -304,17 +304,22 @@ export class Store {
   reserveBatch(id,actor,entries,rules) {
     return this.transaction(()=>{
       const batch=this.queryBatch(id),claims=this.batchClaims(id);
-      if(!batch||!['review','judging'].includes(batch.status)||claims.some(c=>!['approved','rejected'].includes(c.status)))throw new AppError('整批尚未全部审核完成，不能补偿',409);
+      const partial=claims.some(c=>c.rules.aiEnabled);
+      const allowed=partial?['pending','approved','rejected','succeeded']:['approved','rejected'];
+      if(!batch||!['review','judging'].includes(batch.status)||claims.some(c=>!allowed.includes(c.status)))throw new AppError('批次尚有未处理的执行结果，不能补偿',409);
       const approved=claims.filter(c=>c.status==='approved');
       if(!approved.length||entries.length!==approved.length||new Set(entries.map(e=>e.id)).size!==approved.length||approved.some(c=>!entries.some(e=>e.id===c.id)))throw new AppError('补偿批次内容不完整',409);
       const amount=entries.reduce((sum,e)=>sum+e.amount,0);
       if(!Number.isSafeInteger(amount)||amount<=0)throw new AppError('整批补偿金额无效');
-      const caps=[rules.perBatchQuota,...approved.map(c=>c.rules.perBatchQuota)].filter(v=>v>0);
-      if(caps.length&&amount>Math.min(...caps))throw new AppError('整批应补额度超过单次补偿上限，请管理员核实，未执行补偿',409);
+      const paid=claims.filter(c=>c.status==='succeeded').reduce((n,c)=>n+c.amount,0),total=paid+amount;
+      if(!Number.isSafeInteger(total))throw new AppError('批次累计补偿金额无效');
+      const caps=[rules.perBatchQuota,...claims.map(c=>c.rules.perBatchQuota)].filter(v=>v>0);
+      if(caps.length&&total>Math.min(...caps))throw new AppError('整批累计应补额度超过单次补偿上限，请管理员核实，未执行本次补偿',409);
       const now=Date.now(),day=settlementClock(now,rules).day,attempt=randomUUID();
       for(const [owner,quota,count]of [[batch.user_id,rules.userDailyQuota,rules.userDailyCount],[null,rules.siteDailyQuota,rules.siteDailyCount]]){
         const used=this.usage(day,owner);
-        if(used.quota+amount>quota||used.count+1>count)throw new AppError(`${owner===null?'全站':'用户'}当日额度或次数不足，整批已保留`,409);
+        const alreadyCounted=claims.some(c=>c.execution_day===day&&['executing','unknown','succeeded'].includes(c.status));
+        if(used.quota+amount>quota||used.count+(alreadyCounted?0:1)>count)throw new AppError(`${owner===null?'全站':'用户'}当日额度或次数不足，整批已保留`,409);
       }
       for(const entry of entries){
         if(!Number.isSafeInteger(entry.amount)||entry.amount<=0)throw new AppError('单条补偿额度无效');
@@ -323,20 +328,23 @@ export class Store {
         this.event(entry.id,actor,'execution_reserved',{batchId:id,amount:entry.amount,attempt,day});
       }
       this.event(null,actor,'batch_executing',{batchId:id,amount,records:entries.length});
-      return this.updateBatch(id,'executing','全部审核完成，正在合并补额度',amount);
+      return this.updateBatch(id,'executing','正在合并发放本次通过部分',total);
     });
   }
   finishBatch(id,status,actor,note) {
     return this.transaction(()=>{
       const batch=this.queryBatch(id);
       if(!batch||!['executing','unknown'].includes(batch.status))throw new AppError('批次状态不允许此操作',409);
-      for(const claim of this.batchClaims(id).filter(c=>c.status===batch.status)){
+      const active=this.batchClaims(id).filter(c=>c.status===batch.status),amount=active.reduce((n,c)=>n+c.amount,0);
+      for(const claim of active){
         this.db.prepare('UPDATE claims SET status=?,operator_id=?,review_note=?,updated_at=? WHERE id=?').run(status,actor,note,Date.now(),claim.id);
         const eventId=this.event(claim.id,actor,status,{note,batchId:id,previousStatus:claim.status});
         this.notifyUserClaim(this.get(claim.id),'event:'+eventId);
       }
-      this.event(null,actor,'batch_'+status,{batchId:id,amount:batch.amount,note});
-      return this.updateBatch(id,status,note);
+      this.event(null,actor,'batch_'+status,{batchId:id,amount,note});
+      const remaining=this.batchClaims(id),paid=remaining.filter(c=>c.status==='succeeded').reduce((n,c)=>n+c.amount,0);
+      const awaiting=remaining.some(c=>['pending','approved'].includes(c.status));
+      return this.updateBatch(id,status==='succeeded'&&awaiting?'review':status,status==='succeeded'&&awaiting?'通过部分已补回，其余记录待人工审核；后续仅补未到账部分，仍计同一次补偿':note,paid+(status==='unknown'?amount:0));
     });
   }
   cacheLogQuery(key, payload) {
@@ -356,8 +364,11 @@ export class Store {
     return row?{...row,evidence:JSON.parse(row.evidence),analysis:row.analysis?JSON.parse(row.analysis):null}:null;
   }
   aiReviewCount(day, userId) {
+    return this.aiReviewKeys(day,userId).length;
+  }
+  aiReviewKeys(day, userId) {
     const start = Date.parse(day + 'T00:00:00.000Z'), end = start + 86400000;
-    return this.db.prepare('SELECT COUNT(DISTINCT COALESCE(review_batch_id,id)) AS n FROM ai_reviews WHERE user_id=? AND created_at>=? AND created_at<?').get(userId, start, end).n;
+    return this.db.prepare("SELECT DISTINCT COALESCE(review_batch_id,id) AS key FROM ai_reviews WHERE user_id=? AND created_at>=? AND created_at<? AND prompt_version NOT LIKE '%-admin-assist-v1'").all(userId,start,end).map(row=>row.key);
   }
   saveAiReview(input) {
     return this.transaction(() => {

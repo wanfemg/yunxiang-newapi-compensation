@@ -16,7 +16,9 @@ export class QueryBatches {
     const available=batch.status==='open'?batch.logs.filter(log=>log.request_id&&!this.store.byRequest(log.request_id)&&assessLog(log,{id:batch.user_id},rules).eligible):[];
     const items=claims.length?claims.map(c=>({id:c.id,requestId:c.request_id,model:c.log.model_name,status:c.status,amount:c.amount||expectedQuota(c.log,c.rules),note:c.review_note||''})):available.map(log=>({requestId:log.request_id,model:log.model_name,status:'unsubmitted',amount:expectedQuota(log,rules)}));
     const total=items.filter(c=>!['rejected','failed'].includes(c.status)).reduce((n,c)=>n+c.amount,0);
-    return {id:batch.id,userId:batch.user_id,username:batch.username,status:batch.status,note:batch.note,from:batch.query_from,end:batch.query_end,createdAt:batch.created_at,updatedAt:batch.updated_at,amount:batch.amount,expectedAmount:total,records:items.length,models:[...new Set(items.map(c=>c.model))],pending:claims.filter(c=>c.status==='pending').length,approved:claims.filter(c=>c.status==='approved').length,judged:claims.filter(c=>c.status!=='pending'||c.review_note).length,items};
+    const paidAmount=claims.filter(c=>c.status==='succeeded').reduce((n,c)=>n+c.amount,0);
+    const pendingAmount=items.filter(c=>['pending','approved','unsubmitted'].includes(c.status)).reduce((n,c)=>n+c.amount,0);
+    return {id:batch.id,userId:batch.user_id,username:batch.username,status:batch.status,note:batch.note,from:batch.query_from,end:batch.query_end,createdAt:batch.created_at,updatedAt:batch.updated_at,amount:batch.amount,paidAmount,pendingAmount,expectedAmount:total,records:items.length,models:[...new Set(items.map(c=>c.model))],pending:claims.filter(c=>c.status==='pending').length,approved:claims.filter(c=>c.status==='approved').length,judged:claims.filter(c=>c.status!=='pending'||c.review_note).length,items};
   }
   async list(user) {
     const rows=this.store.db.prepare("SELECT id FROM compensation_batches WHERE user_id=? AND status NOT IN ('succeeded','rejected') ORDER BY created_at DESC,id").all(user.id);
@@ -75,12 +77,17 @@ export class QueryBatches {
   async finishJudging(user,id) {
     const batch=this.require(user,id),claims=this.store.batchClaims(id);
     if(!['judging','review'].includes(batch.status))return this.view(user,id);
-    if(claims.some(c=>c.status==='pending')){
+    const partial=claims.some(c=>c.rules.aiEnabled);
+    if(claims.some(c=>c.status==='pending')&&!partial){
       this.store.updateBatch(id,'review','部分记录待人工审核；全部审核结束后统一补额度');
       return this.view(user,id);
     }
     const approved=claims.filter(c=>c.status==='approved');
-    if(!approved.length){this.store.updateBatch(id,'rejected','本次记录均未通过，不占补偿次数');return this.view(user,id);}
+    if(!approved.length){
+      const pending=claims.some(c=>c.status==='pending'),paid=claims.some(c=>c.status==='succeeded');
+      this.store.updateBatch(id,pending?'review':paid?'succeeded':'rejected',pending?'未通过自动判定的记录已转人工审核':paid?'已通过部分补偿完成，其余申请未通过':'本次记录均未通过，不占补偿次数');
+      return this.view(user,id);
+    }
     const entries=[];
     try{
       const target=await this.service.upstream.target(batch.user_id);
@@ -116,7 +123,7 @@ export class QueryBatches {
       return this.view(user,id);
     }
     let status='succeeded',note='云中猫API小站明确返回整批补额度成功';
-    try{await this.service.upstream.credit(batch.user_id,this.store.queryBatch(id).amount);}
+    try{await this.service.upstream.credit(batch.user_id,entries.reduce((n,e)=>n+e.amount,0));}
     catch(error){
       status=error instanceof UpstreamError&&error.definitive?'failed':'unknown';
       note=status==='failed'?'原站明确拒绝，整批未补偿；核查后重新审核':'整批到账结果不明，请核对原站流水，禁止重复补偿';

@@ -11,6 +11,17 @@ import {renderQueryBatch} from '../public/query-batches.js';
 import {groupAuditEvents,renderAuditLog} from '../public/audit-log.js';
 
 async function queried(f){return (await f.service.logs(user,{refresh:true})).batches[0];}
+test('真实 AI 同批限额为一次：通过先补，其余人工审核后仅补剩余',async t=>{
+  const credits=[],f=fixture({logs:[log('pass'),log('unsure',{id:101})],rules:{aiEnabled:true,aiDailyLimit:1,userDailyCount:1},credit:(...args)=>credits.push(args)});t.after(()=>f.store.close());
+  const {AIReviewer}=await import('../src/ai-review.mjs');let reviews=0;
+  f.service.ai=new AIReviewer({store:f.store,env:{AI_BASE_URL:'http://ai.test/v1',AI_API_KEY:'fixture',AI_MODEL:'fixture'},fetcher:async()=>{reviews++;return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({decision:reviews===1?'empty':'uncertain',confidence:.95,reason:'日志判定'})}}]}));}});
+  const b=await queried(f),out=await f.service.batches.submit(user,b.id);
+  assert.equal(reviews,2);assert.equal(out.status,'review');assert.equal(out.paidAmount,120);assert.equal(out.pendingAmount,120);assert.deepEqual(credits,[[user.id,120]]);
+  const remaining=f.store.batchClaims(b.id).find(c=>c.status==='pending');assert.ok(remaining);
+  f.service.review(admin,remaining.id,'approve','核实空回');await f.service.batches.settle(admin,b.id);
+  assert.deepEqual(credits,[[user.id,120],[user.id,120]]);assert.equal(f.store.queryBatch(b.id).amount,240);assert.equal(f.store.overview(user.id).today.count,1);assert.equal(f.store.overview(user.id).today.quota,240);
+  await f.service.batches.settle(admin,b.id);await f.service.batches.submit(user,b.id);assert.equal(credits.length,2);
+});
 test('一次查询跨多个模型和分页：全部判定结束，只向原站合计加额度一次',async t=>{
   const credits=[],f=fixture({logs:Array.from({length:35},(_,i)=>log('multi-'+i,{id:i,quota:2,model_name:i%2?'a':'b'})),rules:{models:['a','b'],userDailyCount:1,maxPending:1},credit:(...args)=>credits.push(args)});t.after(()=>f.store.close());
   const batch=await queried(f);assert.equal(batch.records,35);

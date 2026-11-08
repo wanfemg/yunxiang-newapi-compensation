@@ -17,7 +17,7 @@ import { normalizeAIBaseURL } from './ai-review.mjs';
 import {notificationMarkdown} from './notification-titles.mjs';
 
 const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
-const assetNames = ['app.js','style.css','glass.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','user-inbox.js','audit-log.js','query-batches.js','ui-version.js'];
+const assetNames = ['app.js','style.css','glass.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','user-inbox.js','audit-log.js','query-batches.js','ui-version.js','ai-result.js','amount-panel.js'];
 const assetContents = new Map(['index.html',...assetNames].map(name=>[name,readFileSync(join(publicDirectory,name))]));
 const uiVersion = createHash('sha256').update([...assetContents.values()].join('\0')).digest('hex').slice(0,16);
 const staticFiles = new Set(['/', ...assetNames.map(name=>'/'+name)]);

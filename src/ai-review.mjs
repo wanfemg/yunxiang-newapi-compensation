@@ -125,7 +125,7 @@ export class AIReviewer {
     const existing=this.inflight.get(key);
     if(existing)return existing.promise;
     const promise=this.runReview(log,rules,{...options,mode});
-    this.inflight.set(key,{promise,userId:log.user_id,day:new Date(this.now()).toISOString().slice(0,10),batchId:options.batchId||null});
+    this.inflight.set(key,{promise,mode,userId:log.user_id,day:new Date(this.now()).toISOString().slice(0,10),batchId:options.batchId||null});
     try{return await promise;}finally{this.inflight.delete(key);}
   }
   async runReview(log, rules,{mode='automatic',previousReview=null,batchId=null}={}) {
@@ -135,11 +135,10 @@ export class AIReviewer {
     if (existing) return existing;
     if (mode !== 'admin') {
       const today = new Date(this.now()).toISOString().slice(0, 10);
-      const inflight = new Set([...this.inflight.values()]
-        .filter(item=>item.userId===log.user_id&&item.day===today)
-        .map(item=>item.batchId||item.promise));
-      const used = this.store.aiReviewCount(today, log.user_id)+inflight.size;
-      if (used >= rules.aiDailyLimit) throw new AppError('AI 审核次数已达今日上限，请转管理员审核', 429);
+      const used = new Set([...this.store.aiReviewKeys(today,log.user_id),...this.inflight.values()
+        .filter(item=>item.mode==='automatic'&&item.userId===log.user_id&&item.day===today)
+        .map(item=>item.batchId||item.promise)]);
+      if (!(batchId&&used.has(batchId))&&used.size >= rules.aiDailyLimit) throw new AppError('AI 审核次数已达今日上限，请转管理员审核', 429);
     }
     if (!this.configured()) return this.store.saveAiReview({
       requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion, reviewBatchId: batchId,
@@ -172,7 +171,7 @@ export class AIReviewer {
       });
     } catch (error) {
       return this.store.saveAiReview({
-        requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion,
+        requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion, reviewBatchId: batchId,
         decision: 'uncertain', confidence: 0, reason: 'AI 请求失败，转管理员审核', evidence: [this.redact(error.message, config)], rawResponse: null, status: 'failed'
       });
     }

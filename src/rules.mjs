@@ -142,7 +142,8 @@ export function selfServiceDecision(log, user, rules, now = Date.now(), aiReview
   if(!rules.executionEnabled)reasons.push('返还执行暂未开放');
   if(rules.aiEnabled){
     if(aiReview?.status!=='completed')reasons.push(aiReview?'AI 判定未成功完成，转人工审核':'等待 AI 判定');
-    else if(aiReview.decision!=='empty')reasons.push('AI 未确认空回，转人工审核');
+    else if(aiReview.decision==='not_empty')reasons.push('AI 判定为非空回，转人工审核；置信度不代表空回概率');
+    else if(aiReview.decision!=='empty')reasons.push('AI 证据不足，无法确定是否空回，转人工审核；提高置信度不改变判定结论');
     else if(!Number.isFinite(aiReview.confidence)||aiReview.confidence<rules.aiAutoThreshold/100)reasons.push('AI 置信度未达到当前自动通过阈值 '+rules.aiAutoThreshold+'%，转人工审核');
   }else if(assessment.evidence!=='empty_marked'||!['gemini_empty_candidates','empty_response'].includes(reject))reasons.push('缺少明确的上游空回证据');
   if(other.billing_source!=='wallet'&&fundingSource(log)!=='subscription')reasons.push('余额消费来源尚未确认');

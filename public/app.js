@@ -6,6 +6,8 @@ import {watchUIVersion} from './ui-version.js';
 import {userInbox} from './user-inbox.js';
 import {renderAuditLog} from './audit-log.js';
 import {renderQueryBatch,batchStatus} from './query-batches.js';
+import {aiResultLabel} from './ai-result.js';
+import {renderAmountPanel,bindAmountPanel} from './amount-panel.js';
 const canonicalOrigin = document.querySelector('meta[name="application-origin"]')?.content;
 if (canonicalOrigin && new URL(canonicalOrigin).protocol === 'https:' && location.origin !== canonicalOrigin) {
   location.replace(canonicalOrigin + '/');
@@ -20,6 +22,7 @@ const money=value=>formatQuota(value,s.display);
 const quotaFields=new Set(['perRecordQuota','perBatchQuota','selfServiceMaxQuota','userDailyQuota','siteDailyQuota']);
 let catalog=null,aiConfig=null,adminStatus='pending',adminDrill=null,pickedModels=new Set(),claimGroup=null;
 let excludedModels=new Map();
+const expandedModelChannels=new Set();
 const modelRuleKey=(channelId,model)=>JSON.stringify([channelId,model]);
 let storagePlan=null,notificationTab='ding';
 let inboxUnreadOnly=false,inboxTimer=null,aiSettingsSave=null;
@@ -164,7 +167,7 @@ async function logs({refresh=false}={}){
   if(s.user!==owner||s.page!==page)return;selectedLogs.clear();currentLogs=data.items;
   const meta=await refundMeta();if(s.user!==owner||s.page!==page)return;
   const progress=data.queryProgress;
-  $('#content').innerHTML=refundHeader(meta.overview,true)+'<section class="refund-candidates"><div class="refund-history-heading"><h3>按查询补偿</h3><span>全部模型审核完成后统一补额度</span></div>'+(data.batches?.length?data.batches.map(batch=>renderQueryBatch(batch,{money,date})).join(''):empty('暂无待处理的补偿批次'))+(progress?'<div class="query-progress" role="status"><strong>已成功查询至 '+esc(date(progress.end*1000))+'</strong><span>'+(progress.scanned?'本次新增 '+num(progress.added)+' 条消费':'当前显示已保存的查询结果')+'</span><p>再次查询仅接续新增时间，已覆盖时段不再回扫。原站延迟写入已覆盖时段的日志不会补查。</p></div>':'')+'</section>'+skippedModelsMarkup(data)+refundRecordsMarkup(meta.records);
+  $('#content').innerHTML=refundHeader(meta.overview,true)+'<section class="refund-candidates"><div class="refund-history-heading"><h3>按查询补偿</h3><span>AI 通过部分先补，其余转人工审核</span></div>'+(data.batches?.length?data.batches.map(batch=>renderQueryBatch(batch,{money,date})).join(''):empty('暂无待处理的补偿批次'))+(progress?'<div class="query-progress" role="status"><strong>已成功查询至 '+esc(date(progress.end*1000))+'</strong><span>'+(progress.scanned?'本次新增 '+num(progress.added)+' 条消费':'当前显示已保存的查询结果')+'</span><p>再次查询仅接续新增时间，已覆盖时段不再回扫。原站延迟写入已覆盖时段的日志不会补查。</p></div>':'')+'</section>'+skippedModelsMarkup(data)+refundRecordsMarkup(meta.records);
   icons();return;
 }
 async function claims(){
@@ -215,15 +218,15 @@ async function detail(id){
   const eventLabels={application_created:'提交补偿申请',ai_review_started:'开始 AI 空回审查',ai_reviewed:'AI 空回判定',admin_ai_reviewed:'管理员 AI 辅助审核',self_service_routed:'自动核验分流',execution_reserved:'锁定本笔返还额度',...statuses};
   const ai=c.aiReview,aiReviewMode=c.aiReviewMode;
   const aiAnalysis=ai?.analysis;
-  const recommendationLabel={approve:'建议通过并补额度',reject:'建议驳回申请',manual:'建议转人工核实'}[aiAnalysis?.recommendation]||'建议不明确，按人工流程处理';
+  const recommendationLabel=aiResultLabel(ai,aiReviewMode);
   $('#detail-body').innerHTML=(admin&&s.page==='adminClaims'&&claimGroup?'<button class="ghost group-back" data-owner="'+c.user_id+'">'+icon('arrow-left')+'返回用户申请</button>':'')+'<div class="detail-status">'+badge(c.status)+'<span>'+esc(c.id)+'</span></div><div class="detail-amounts"><div><small>原消费</small><strong>'+money(c.log.quota)+'</strong></div><div><small>预计补偿</small><strong>'+money(c.expectedAmount)+'</strong></div><div><small>实际补偿</small><strong class="amount">'+money(c.amount)+'</strong></div></div><div class="notice compensation-banner">'+esc(compensationLabel(c))+' · 本记录属于空回补偿流水</div>'+(ai?'<div class="notice '+(ai.decision==='empty'?'success':'warning')+'">AI 判定：'+esc(ai.decision==='empty'?'疑似空回':ai.decision==='not_empty'?'非空回':'无法确定')+' · 置信度 '+Math.round(ai.confidence*100)+'%<br>'+esc(ai.reason)+(ai.evidence?.length?'<br>依据：'+esc(ai.evidence.join('；')):'')+'</div>':'')+(c.fundingSource==='subscription'?'<div class="notice warning">订阅消费由站长审批并核实金额，审核通过后补入钱包余额，不恢复订阅额度。仅原站确认成功才标记到账。</div>':'')+'<div class="detail-facts">'+lines([['补偿类型',compensationLabel(c)],['原请求',c.request_id],['模型',c.log.model_name],['资金来源',fundingLabel(c.fundingSource)],['申请理由',c.reason],['处理说明',c.review_note||'尚未处理'],['申请时间',date(c.created_at)],['更新时间',date(c.updated_at)]])+'</div><div class="action-row">'+actions.map(([a,t])=>'<button class="secondary" data-action="'+a+'" data-id="'+id+'">'+t+'</button>').join('')+'</div><h3 class="detail-section-title">处理时间线</h3><ol class="claim-timeline">'+c.events.map(e=>'<li><strong>'+esc(eventLabels[e.action]||e.action)+'</strong><span>'+date(e.created_at)+(admin?' · 操作人 #'+esc(e.actor_id):'')+'</span></li>').join('')+'</ol>'+(admin?renderSnapshot({log:c.log,rules:c.rules,verification_note:c.verification_note,attempt_id:c.attempt_id},{formatQuota:money}):'');
   if(admin)$('#detail-body').insertAdjacentHTML('afterbegin','<div class="detail-account">'+icon('user-round')+'<div><strong>'+esc(c.username)+'</strong><span class="sub">原站用户 ID '+c.user_id+' · '+esc(c.source==='manual'?'人工申请':'用户自助申请')+'</span></div></div>');
   if(admin){
     const enabled=Boolean(s.rules?.aiEnabled);
-    if(c.batch_id)document.querySelector('#detail-body').insertAdjacentHTML('afterbegin','<div class="notice">本记录属于查询批次 '+esc(c.batch_id.slice(0,8))+'。全部审核结束后统一补额度，计 1 次补偿；对账作用于整批。</div>');
+    if(c.batch_id)document.querySelector('#detail-body').insertAdjacentHTML('afterbegin','<div class="notice">本记录属于查询批次 '+esc(c.batch_id.slice(0,8))+'。开启 AI 时，通过部分先补，其余人工审核后仅补未到账部分，计同一次补偿；未开启 AI 时全部审核后合并。对账仅核对当前未确认的发放。</div>');
     const historical=ai&&!c.aiReviewIsCurrent;
     const canAccept=enabled&&c.status==='pending'&&c.aiReviewIsCurrent&&ai?.status==='completed'&&aiAnalysis?.recommendation==='approve'&&ai.decision==='empty'&&ai.confidence*100>=s.rules.aiAutoThreshold&&c.fundingSource!=='subscription';
-    const detail=ai?'<div class="ai-review-result"><strong>'+esc(aiReviewMode==='admin'?'二次复核 · ':'初始判定 · ')+esc(recommendationLabel)+' · '+Math.round(ai.confidence*100)+'%</strong>'+(aiAnalysis?.summary?'<p><b>综合判断：</b>'+esc(aiAnalysis.summary)+'</p>':'')+'<p><b>判断原因：</b>'+esc(ai.reason)+'</p>'+(ai.evidence?.length?'<p><b>判断依据：</b>'+esc(ai.evidence.join('；'))+'</p>':'')+(aiReviewMode!=='admin'&&ai.status==='completed'?'<p>点击 AI 辅助分析进行独立二次复核。</p>':'')+'</div>':'';
+    const detail=ai?'<div class="ai-review-result"><strong>'+esc(aiReviewMode==='admin'?'二次复核 · ':'')+esc(recommendationLabel)+' · 对该结论的置信度 '+Math.round(ai.confidence*100)+'%</strong>'+(aiAnalysis?.summary?'<p><b>综合判断：</b>'+esc(aiAnalysis.summary)+'</p>':'')+'<p><b>判断原因：</b>'+esc(ai.reason)+'</p>'+(ai.evidence?.length?'<p><b>判断依据：</b>'+esc(ai.evidence.join('；'))+'</p>':'')+'<p><b>当前自动通过阈值：</b>'+esc(s.rules?.aiAutoThreshold)+'%（仅适用于空回结论，仍需通过扣费来源、退款及额度规则核验）</p>'+(c.review_note?'<p><b>实际处理原因：</b>'+esc(c.review_note)+'</p>':'')+(aiReviewMode!=='admin'&&ai.status==='completed'?'<p>尚未进行管理员二次复核，点击 AI 二次复核获取独立建议。</p>':'')+'</div>':'';
     const accept=canAccept?'<button type="button" class="primary" data-ai-approve="'+esc(id)+'">'+icon('check')+'采纳建议并通过补额度</button>':'';
     const subscriptionHint=enabled&&c.status==='pending'&&c.fundingSource==='subscription'?'<p class="field-help">订阅消费需逐笔核实未退款金额，保留原审批与金额确认流程。</p>':'';
     $('#detail-body .detail-facts').insertAdjacentHTML('beforebegin','<section class="admin-ai-assist"><div class="ai-assist-heading"><h3>AI 辅助审核</h3><div>'+(enabled&&['pending','approved'].includes(c.status)?'<button type="button" class="secondary" data-ai-assist="'+esc(id)+'">'+icon('sparkles')+(aiReviewMode==='admin'&&c.aiReviewIsCurrent?'查看当前复核':historical?'按当前提示词复核':'AI 二次复核')+'</button>':'')+accept+'</div></div>'+detail+'<p class="field-help">'+(historical?'上方为旧提示词版本的分析结果，已保留审核依据。':enabled?'AI 独立复核日志、补偿规则和初始判定，给出综合建议；仅管理员明确采纳后才会执行补偿。':'AI 辅助审核未开启，在补偿规则设置中开启并保存后使用。')+'</p>'+subscriptionHint+'<p data-ai-assist-feedback class="field-help" role="status"></p></section>');
@@ -234,9 +237,10 @@ const numeric=[['userDailyQuota','每用户每日可补额度'],['userDailyCount
 async function rules(){
   const admin=s.page==='settings',r=await api(admin?'/api/admin/rules':'/api/rules');s.rules=r;
   if(admin){await settingsPage(r);return;}
-  if(!admin){$('#content').innerHTML=panel('补偿规则 · v'+r.version,'<div class="panel-body">'+lines([['处理方式',r.selfServiceEnabled?'正常自助 · 异常审批':'自助暂停 · 人工审批'],['自动审批单条上限',money(r.selfServiceMaxQuota)],['结算等待',r.selfServiceMinAgeSeconds+' 秒'],['申请状态',r.applicationsEnabled?'开放':'暂停'],['执行状态',r.executionEnabled?'开放':'暂停'],['支持模型',r.restrictModels===false?'全部可补模型':r.models.join('、')||'未配置'],['返还比例',r.refundBasisPoints/100+'%'],['单条消费补回上限',r.perRecordQuota?money(r.perRecordQuota):'不额外限制'],['单次补偿总额上限',r.perBatchQuota?money(r.perBatchQuota):'不额外限制'],['每日可补额度',money(r.userDailyQuota)],['每日最多补偿次数',r.userDailyCount],['待处理补偿次数上限',r.maxPending],['日志读取范围','最近 '+(r.lookbackDays||Math.ceil(r.applicationHours/24))+' 天'],['每日重置时间',r.dailyResetTime||'00:00'],['结算时区',r.timezone]])+'</div>')+'<div class="notice">一次查询的记录全部审核结束后，通过部分统一补额度，计一次补偿。到账结果不明时整批锁定，等待管理员核对。</div>';return;}
+  if(!admin){$('#content').innerHTML=panel('补偿规则 · v'+r.version,'<div class="panel-body">'+lines([['处理方式',r.selfServiceEnabled?'正常自助 · 异常审批':'自助暂停 · 人工审批'],['自动审批单条上限',money(r.selfServiceMaxQuota)],['结算等待',r.selfServiceMinAgeSeconds+' 秒'],['申请状态',r.applicationsEnabled?'开放':'暂停'],['执行状态',r.executionEnabled?'开放':'暂停'],['支持模型',r.restrictModels===false?'全部可补模型':r.models.join('、')||'未配置'],['返还比例',r.refundBasisPoints/100+'%'],['单条消费补回上限',r.perRecordQuota?money(r.perRecordQuota):'不额外限制'],['单次补偿总额上限',r.perBatchQuota?money(r.perBatchQuota):'不额外限制'],['每日可补额度',money(r.userDailyQuota)],['每日最多补偿次数',r.userDailyCount],['待处理补偿次数上限',r.maxPending],['日志读取范围','最近 '+(r.lookbackDays||Math.ceil(r.applicationHours/24))+' 天'],['每日重置时间',r.dailyResetTime||'00:00'],['结算时区',r.timezone]])+'</div>')+'<div class="notice">一次查询计一个补偿批次。开启 AI 时通过部分先补，其余转人工；未开启时全部审核后合并。后续仅补未到账部分，累计受单次上限约束。到账不明时批次锁定等待核对。</div>';return;}
 }
 async function settingsPage(r){
+  expandedModelChannels.clear();
   s.display=await api('/api/display');
   const storage=await api('/api/admin/storage');
   let error='',groups=[];try{[catalog,groups,aiConfig]=await Promise.all([api('/api/admin/catalog'),api('/api/admin/groups').then(v=>v.groups),api('/api/admin/ai-config')]);}catch(e){catalog=null;error=e.message;try{aiConfig=await api('/api/admin/ai-config');}catch{}}
@@ -259,8 +263,8 @@ function renderCatalogModels(){
   const root=$('#catalog-models');if(!root)return;
   const ids=[...document.querySelectorAll('[name=channel-choice]:checked')].map(el=>Number(el.value));
   const query=$('#model-search').value.trim().toLowerCase(),restricted=$('[name=restrictModels]').checked;
-  const openChannels=new Set([...root.querySelectorAll('details[open][data-model-channel]')].map(el=>Number(el.dataset.modelChannel)));
-  const existingChannels=new Set([...root.querySelectorAll('[data-model-channel]')].map(el=>Number(el.dataset.modelChannel)));
+  for(const el of root.querySelectorAll('[data-model-channel]')){const id=Number(el.dataset.modelChannel);if(el.open)expandedModelChannels.add(id);else expandedModelChannels.delete(id);}
+  const openChannels=expandedModelChannels;
   const choice=(channelId,model,historical=false)=>{
     const blocked=excludedModels.has(modelRuleKey(channelId,model));
     return '<div class="channel-model-row'+(blocked?' is-excluded':'')+'"><div><strong>'+esc(model)+'</strong>'+(historical?'<small>历史模型</small>':'')+'</div><div class="model-policy-options">'+(restricted?'<label class="check-label"><input name="model-choice" type="checkbox" data-channel="'+channelId+'" value="'+esc(model)+'" '+(pickedModels.has(model)&&!blocked?'checked':'')+'>允许补偿</label>':'')+'<label class="check-label"><input name="excluded-model-choice" type="checkbox" data-channel="'+channelId+'" value="'+esc(model)+'" '+(blocked?'checked':'')+'>不可补</label></div></div>';
@@ -271,7 +275,7 @@ function renderCatalogModels(){
     const matches=models.filter(model=>model.toLowerCase().includes(query));
     if(query&&!matches.length)return '';
     const excluded=models.filter(model=>excludedModels.has(modelRuleKey(id,model))).length;
-    return '<details class="channel-model-group" data-model-channel="'+id+'" '+(!existingChannels.has(id)||openChannels.has(id)?'open':'')+'><summary><span>'+icon('chevron-right')+'<strong>'+esc(channel?.name||'历史渠道 #'+id)+'</strong></span><small>'+models.length+' 个模型 · '+excluded+' 个不可补</small></summary><div class="channel-model-actions"><button type="button" class="ghost" data-model-batch="exclude" data-channel="'+id+'" title="排除本渠道当前搜索匹配的全部模型">'+icon('ban')+'排除匹配项</button><button type="button" class="ghost" data-model-batch="restore" data-channel="'+id+'" title="取消本渠道当前搜索匹配模型的排除规则">'+icon('rotate-ccw')+'取消排除</button></div>'+matches.map(model=>choice(id,model,!current.includes(model))).join('')+(matches.length?'':empty('该渠道暂无模型'))+'</details>';
+    return '<details class="channel-model-group" data-model-channel="'+id+'" '+(openChannels.has(id)?'open':'')+'><summary><span>'+icon('chevron-right')+'<strong>'+esc(channel?.name||'历史渠道 #'+id)+'</strong></span><small>'+models.length+' 个模型 · '+excluded+' 个不可补</small></summary><div class="channel-model-actions"><button type="button" class="ghost" data-model-batch="exclude" data-channel="'+id+'" title="排除本渠道当前搜索匹配的全部模型">'+icon('ban')+'排除匹配项</button><button type="button" class="ghost" data-model-batch="restore" data-channel="'+id+'" title="取消本渠道当前搜索匹配模型的排除规则">'+icon('rotate-ccw')+'取消排除</button></div>'+matches.map(model=>choice(id,model,!current.includes(model))).join('')+(matches.length?'':empty('该渠道暂无模型'))+'</details>';
   }).join('');
   const outside=[...excludedModels.values()].filter(entry=>!ids.includes(entry.channelId)&&entry.model.toLowerCase().includes(query));
   const currentModels=(catalog?.channels||[]).filter(c=>ids.includes(c.id)).flatMap(c=>c.models);
@@ -347,14 +351,15 @@ async function action(name,ids){
   if(!ids.length)return toast('先勾选申请');if(ids.length>30)throw Error('每批最多 30 笔');const items=[];let body='';
   if(['execute','approve'].includes(name)){
     s.display=await api('/api/display');
-    for(const id of ids){const c=await api('/api/admin/claims/'+id);if(c.status!==(name==='execute'?'approved':'pending'))throw Error('申请状态已变化，请刷新后处理：'+id);items.push({id,quota:c.log.quota,requestId:c.request_id,confirmAmount:name==='execute'||c.fundingSource==='subscription'});}
+    for(const id of ids){const c=await api('/api/admin/claims/'+id);if(c.status!==(name==='execute'?'approved':'pending'))throw Error('申请状态已变化，请刷新后处理：'+id);items.push({id,quota:c.log.quota,requestId:c.request_id,model:c.log.model_name,batchId:c.batch_id,confirmAmount:name==='execute'||c.fundingSource==='subscription',expectedAmount:c.expectedAmount,safeDefault:c.fundingSource==='wallet'});}
     const crediting=items.filter(item=>item.confirmAmount).length;
-    body='<div class="notice '+(crediting?'warning':'')+'">本次处理 '+items.length+' 笔申请。'+(crediting?'其中 '+crediting+' 笔将核验并补入用户钱包余额。订阅申请审批通过即发起余额补偿，不恢复订阅额度；须核实原扣费及历史退款，结果不明禁止直接重试。':'审核通过后等待核验执行。')+'</div>'+items.map((c,i)=>c.confirmAmount?'<label class="amount-entry">'+esc(c.requestId)+'<span class="field-help">原消费 '+money(c.quota)+'，填写已核实未返还金额</span><input name="amount-'+i+'" type="number" min="0" max="'+inputQuota(c.quota,s.display)+'" step="any" required placeholder="逐笔核实后填写"></label>':'').join('');
+    body='<div class="notice '+(crediting?'warning':'')+'">本次处理 '+items.length+' 笔申请。'+(crediting?'确认前核实原扣费及历史退款。订阅通过后补入余额，不恢复订阅额度；到账结果不明时禁止重复发放。':'审核通过后按批次状态处理补偿。')+'</div>'+(crediting?renderAmountPanel(items,s.display,money):'');
   }
   else{for(const id of ids)items.push({id,outcome:name});body='<div class="notice">本次处理 '+ids.length+' 笔申请。'+(['received','not_received'].includes(name)?'仅登记核对结果，不发放额度。':'操作会记录审计。')+'</div>';}
   const crediting=items.some(item=>item.confirmAmount);
   showOperation(name==='execute'?'核验并确认返还':name==='approve'&&crediting?'审核并确认补入余额':({approve:'审核通过',reject:'驳回申请',reopen:'重新审核',received:'登记已到账',not_received:'登记未到账'}[name]||'确认处理'),body+operationNote(crediting?'核验说明：实际扣费、历史退款及无有效输出依据':'审核 / 核对依据'),{kind:'action',name,items,display:structuredClone(s.display)});
   if(name==='approve'&&crediting)$('#operation-submit').textContent='确认审核并补入余额';
+  bindAmountPanel($('#operation-body'),items,s.display,s.rules,money);
 }
 async function submitOperation(form){
   if(operation?.kind==='queryBatch'){await submitQueryBatch(form);return;}
@@ -402,7 +407,7 @@ async function submitQueryBatch(form){
       if(operation?.id===id)$('#operation-body').innerHTML=loading((s.rules?.aiEnabled?'正在进行 AI 审查':'正在核验消费')+' · 已处理 '+batch.judged+' / '+batch.records+' 条')+'<progress class="batch-progress" max="'+Math.max(1,batch.records)+'" value="'+batch.judged+'" aria-label="整批审查进度"></progress>';
     }catch{}finally{polling=false;}
   };
-  $('#operation-body').innerHTML=loading(s.rules?.aiEnabled?'正在进行 AI 审查，全部审核后合并补额度…':'正在逐条核验，全部审核后合并补额度…');
+  $('#operation-body').innerHTML=loading(s.rules?.aiEnabled?'正在进行 AI 审查，完成后先补通过部分，其余转人工…':'正在逐条核验，全部审核后合并补额度…');
   const timer=setInterval(showProgress,2000);
   try{
     const result=await api('/api/batches/'+id+'/submit','POST',{reason:note});
