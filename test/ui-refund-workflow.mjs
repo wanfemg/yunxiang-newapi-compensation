@@ -50,6 +50,11 @@ try{
   let releaseSubmit;const submitGate=new Promise(resolve=>releaseSubmit=resolve);
   await page.route('**/api/claims',async route=>{if(route.request().method()==='POST')await submitGate;await route.continue();});
   await page.locator('#operation-submit').click();await page.locator('#operation-submit[aria-busy=true]').waitFor();
+  assert.equal(await page.locator('#operation-body .px-loading-cat').isVisible(),true,'model compensation uses the interactive waiting cat');
+  assert.equal(await page.locator('#operation-body .px-loading-cat img').evaluate(el=>getComputedStyle(el).animationName),'px-wait-cat-bob');
+  const operationCatBubble=page.locator('#operation-body .px-loading-bubble'),operationFirstReply=await operationCatBubble.innerText();
+  await page.locator('#operation-body .px-loading-cat').click();
+  assert.notEqual(await operationCatBubble.innerText(),operationFirstReply,'the cat replies while model compensation is pending');
   assert.equal(fixture.remote.data.credits.length,0,'only confirmed submission may credit');
   await page.screenshot({path:'test-results/refund-approval-loading.png',fullPage:true});
   releaseSubmit();await page.getByRole('heading',{name:'逐笔处理结果',exact:true}).waitFor();await page.unroute('**/api/claims');

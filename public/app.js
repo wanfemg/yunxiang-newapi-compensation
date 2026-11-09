@@ -33,7 +33,7 @@ const statuses = {pending:'待审核',approved:'已通过 · 待执行',rejected
 const pages = {overview:'我的概览',statistics:'数据统计',logs:'可补空回日志',claims:'我的申请',records:'补偿记录',rules:'补偿规则',help:'使用教程与答疑',adminOverview:'管理概览',adminLogs:'原始消费查询',adminClaims:'申请处理中心',stats:'补偿统计',settings:'补偿规则设置',notifications:'钉钉通知',audit:'操作记录'};
 const eventNames = {application_pending:'申请待审核',review_result:'审核结果',compensation_success:'补偿成功',execution_failed:'执行失败',execution_unknown:'结果待确认',ai_reviewing:'AI 审查开始',ai_reviewed:'AI 判定结果',ai_auto_compensation:'AI 审查通过 · 自动补额度',ai_manual_review:'AI 不确定 · 转人工审核',batch_result:'批量申请汇总'};
 const filters = {model:'',requestId:'',channel:'',view:'eligible',status:'',start:'',end:''};
-let statKind = 'users';
+let statKind = 'users', loadingCatSequence = 0;
 let currentLogs=[], operation=null;
 const selectedLogs=new Set();
 function updateLogSelection(){
@@ -47,7 +47,9 @@ function updateLogSelection(){
 }
 const mobile = matchMedia('(max-width: 900px)');
 let statisticsDays=30, statisticsAuto=false, statisticsTimer=null, statisticsRequest=0,refundQueried=false;
-const loading=message=>'<div class="loading px-loading" role="status" aria-busy="true"><span class="px-loading-sprite" aria-hidden="true"><i></i><b></b></span><span class="px-loading-copy"><strong>'+esc(message)+'</strong><span class="px-loading-track" aria-hidden="true"><i></i></span></span></div>';
+const loading=message=>{const id=++loadingCatSequence;return '<div class="loading px-loading" role="status" aria-busy="true"><div class="query-wait-pet px-loading-pet"><div class="query-cat-bubble px-loading-bubble" id="px-loading-bubble-'+id+'" aria-live="polite">喵，我正在核对空回补偿。</div><button type="button" class="query-wait-cat px-loading-cat" id="px-loading-cat-'+id+'" aria-label="点击小猫听听它说什么" aria-describedby="px-loading-bubble-'+id+'"><img alt="正在处理的小猫" draggable="false"></button></div><span class="px-loading-copy"><strong>'+esc(message)+'</strong><span class="px-loading-track" aria-hidden="true"><i></i></span></span></div>';};
+function showLoading(target,message){target.innerHTML=loading(message);const cat=target.querySelector('.px-loading-cat');mountWaitingCat(cat.id,cat.getAttribute('aria-describedby'));}
+function updateLoading(target,message){const copy=target.querySelector('.px-loading-copy strong');if(copy)copy.textContent=message;else showLoading(target,message);}
 function busyButton(button,busy){if(!button)return;button.classList.toggle('is-loading',busy);button.setAttribute('aria-busy',String(busy));}
 const navSymbols={overview:'▣',statistics:'▥',logs:'▤',claims:'▧',records:'◷',rules:'◆',help:'?',inbox:'✉',adminOverview:'▦',adminLogs:'⌕',adminClaims:'☷',stats:'▥',settings:'⚙',notifications:'♧',audit:'▤'};
 const icon=name=>'<i data-lucide="'+name+'" aria-hidden="true"></i>';
@@ -90,7 +92,7 @@ async function enter(data){refundQueried=false;catalog=null;s.display=null;s.use
 async function render(){
   const owner=s.user,page=s.page;
   $('#content').classList.remove('is-fetching');$('#content').removeAttribute('aria-busy');
-  nav();$('#page-title').textContent=pages[s.page];$('#breadcrumb').textContent=pages[s.page];$('#page-subtitle').textContent=s.page==='statistics'?'查看当前账号的补回额度与每日趋势。':s.page==='help'?'了解查询、审核、补偿和失败处理流程。':'正常自助返还，异常提交审批。每笔处理有据可查。';$('#page-kicker').textContent=['overview','statistics','logs','claims','records','rules','help'].includes(s.page)?'MY WORKSPACE':'ADMINISTRATION';$('#content').innerHTML=loading('正在读取记录…');$('#refresh').hidden=s.page==='statistics';
+  nav();$('#page-title').textContent=pages[s.page];$('#breadcrumb').textContent=pages[s.page];$('#page-subtitle').textContent=s.page==='statistics'?'查看当前账号的补回额度与每日趋势。':s.page==='help'?'了解查询、审核、补偿和失败处理流程。':'正常自助返还，异常提交审批。每笔处理有据可查。';$('#page-kicker').textContent=['overview','statistics','logs','claims','records','rules','help'].includes(s.page)?'MY WORKSPACE':'ADMINISTRATION';showLoading($('#content'),'正在读取记录…');$('#refresh').hidden=s.page==='statistics';
   try{if(s.page.endsWith('Overview')||s.page==='overview')await overview();else if(s.page==='statistics')await personalStatistics();else if(['logs','adminLogs'].includes(s.page))await logs();else if(['claims','records','adminClaims'].includes(s.page))await claims();else if(['rules','settings'].includes(s.page))await rules();else if(s.page==='help')help();else if(s.page==='inbox')await inbox();else if(s.page==='stats')await stats();else if(s.page==='notifications')await notifications();else await audit();icons();if(s.page!=='inbox')refreshInboxBadge().catch(()=>{});}
   catch(e){if(owner!==s.user||page!==s.page)return;$('#content').innerHTML='<div class="notice warning">'+esc(e.message)+'</div><p class="muted">核对 云中猫API小站 连接与管理凭据后刷新。页面不使用示例数据替代真实记录。</p>';}
 }
@@ -188,7 +190,7 @@ async function adminQueue(){
 async function openClaimGroup(owner,page=1){
   const status=claimGroup?.owner===Number(owner)?claimGroup.status:adminStatus;
   claimGroup={owner:Number(owner),status,page};
-  $('#detail-body').innerHTML=loading('正在读取用户申请');if(!$('#detail-dialog').open)$('#detail-dialog').showModal();
+  showLoading($('#detail-body'),'正在读取用户申请');if(!$('#detail-dialog').open)$('#detail-dialog').showModal();
   const query=new URLSearchParams({owner,status,page}),[data,summary,display]=await Promise.all([api('/api/admin/claims?'+query),api('/api/admin/claim-groups?'+new URLSearchParams({owner,status})),api('/api/display')]);s.display=display;
   if(claimGroup?.owner!==Number(owner)||claimGroup.page!==page||s.page!=='adminClaims')return;
   const group=summary.items[0];if(!group){$('#detail-body').innerHTML=empty('此用户在当前板块已无申请');return;}
@@ -373,7 +375,7 @@ async function submitOperation(form){
   button.textContent=processingMessage;
   if(op.kind==='apply'){
     $('#operation-body').hidden=false;
-    $('#operation-body').innerHTML=loading(aiActive?'AI 正在综合日志与补偿规则，请稍候…':'正在核验消费记录并准备补额度…');
+    showLoading($('#operation-body'),aiActive?'AI 正在综合日志与补偿规则，请稍候…':'正在核验消费记录并准备补额度…');
     $('#operation-results').replaceChildren();
   }
   let data;
@@ -404,10 +406,10 @@ async function submitQueryBatch(form){
     if(polling)return;polling=true;
     try{
       const batch=await api('/api/batches/'+id);
-      if(operation?.id===id)$('#operation-body').innerHTML=loading((s.rules?.aiEnabled?'正在进行 AI 审查':'正在核验消费')+' · 已处理 '+batch.judged+' / '+batch.records+' 条')+'<progress class="batch-progress" max="'+Math.max(1,batch.records)+'" value="'+batch.judged+'" aria-label="整批审查进度"></progress>';
+      if(operation?.id===id){const body=$('#operation-body');updateLoading(body,(s.rules?.aiEnabled?'正在进行 AI 审查':'正在核验消费')+' · 已处理 '+batch.judged+' / '+batch.records+' 条');let progress=body.querySelector('.batch-progress');if(!progress){body.insertAdjacentHTML('beforeend','<progress class="batch-progress" max="'+Math.max(1,batch.records)+'" value="'+batch.judged+'" aria-label="整批审查进度"></progress>');progress=body.querySelector('.batch-progress');}progress.max=Math.max(1,batch.records);progress.value=batch.judged;}
     }catch{}finally{polling=false;}
   };
-  $('#operation-body').innerHTML=loading(s.rules?.aiEnabled?'正在进行 AI 审查，完成后先补通过部分，其余转人工…':'正在逐条核验，全部审核后合并补额度…');
+  showLoading($('#operation-body'),s.rules?.aiEnabled?'正在进行 AI 审查，完成后先补通过部分，其余转人工…':'正在逐条核验，全部审核后合并补额度…');
   const timer=setInterval(showProgress,2000);
   try{
     const result=await api('/api/batches/'+id+'/submit','POST',{reason:note});

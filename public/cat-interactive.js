@@ -2,9 +2,9 @@
 // 云响 · 动态小猫交互系统 & 登录弹窗控制器
 // ================================================================
 
-export function mountWaitingCat() {
-  const stage = document.getElementById('query-wait-cat');
-  const bubble = document.getElementById('query-cat-bubble');
+export function mountWaitingCat(stageId = 'query-wait-cat', bubbleId = 'query-cat-bubble') {
+  const stage = document.getElementById(stageId);
+  const bubble = document.getElementById(bubbleId);
   const image = stage?.querySelector('img');
   const source = document.getElementById('mc-cat-img');
   if (!stage || !bubble || !image || !source) return;
