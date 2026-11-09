@@ -1,27 +1,296 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark light"><title>云响 · 云中猫API小站 补空回</title>
-  <link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/glass.css"><script src="/icons.js" defer></script><script type="module" src="/app.js"></script>
+  <meta name="color-scheme" content="light"><title>云响 · 云中猫API小站 补空回</title>
+  <link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/glass.css"><link rel="stylesheet" href="/pixel.css"><script src="/icons.js" defer></script><script type="module" src="/app.js"></script>
 </head>
 <body>
   <div id="toast" role="status" aria-live="polite" hidden></div>
-  <section id="login" class="login-layout">
-    <div class="login-story"><div class="brand"><span class="brand-icon" data-brand-logo><i data-lucide="cloud"></i></span> 云响 <small>云中猫API小站</small></div>
-      <span class="eyebrow">云响 · 补偿工作台</span><h1>空了有回响，<br>额度回到余额。</h1><p>查询空回、选择模型、补回额度。<br>正常自动到账，异常才进入审批。</p>
-      <div class="story-foot"><span>01 原账号身份</span><span>02 逐笔可追溯</span><span>03 异常审批</span></div>
+    <main id="login" class="mc" lang="zh-CN">
+    <div class="mc-shell">
+      <header class="mc-top">
+        <div class="mc-brand">
+          <span class="mc-logo" aria-hidden="true">响</span>
+          云响 <small style="font-size:12px;font-weight:400;color:#5d766a;margin-left:6px;">云中猫API小站 补空回平台</small>
+        </div>
+        <div style="display:flex;align-items:center;gap:16px;">
+          <span class="mc-top-note">EMPTY ECHO, INSTANT RETURN.</span>
+          <button type="button" class="mc-top-login-btn" id="open-login-top">登录工作台 ↗</button>
+        </div>
+      </header>
+
+      <section class="mc-hero" aria-labelledby="mc-title">
+        <div>
+          <span class="mc-eyebrow">
+            <span class="mc-square" aria-hidden="true"></span>
+            云端灵感守护 / YUNXIANG COMPENSATION
+          </span>
+          <h1 id="mc-title">空了有回响，<span>额度回余额。</span></h1>
+          <p class="mc-description">
+            模型偶尔空回？不用担心额度被白白扣除。<br>
+            云响智能扫描原站未消费流水，逐笔凭证核验，一键补回原站钱包余额。
+          </p>
+          <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
+            <button type="button" class="mc-hero-link" id="open-login-hero">进入补偿工作台 <span aria-hidden="true">↗</span></button>
+            <a class="mc-hero-link mc-hero-link-sub" href="#rules-section">
+              查看补偿规则 <span aria-hidden="true">✦</span>
+            </a>
+          </div>
+          <div class="mc-hero-badges">
+            <span>01 原账号直登</span>
+            <span>02 逐笔可追溯</span>
+            <span>03 异常快速审批</span>
+          </div>
+        </div>
+
+        <div class="mc-scene" id="mc-cat-scene">
+          <span class="mc-spark" aria-hidden="true">+</span>
+
+          <!-- 小猫上方对话气泡 -->
+          <div class="mc-bubble" id="mc-cat-bubble">
+            <span class="mc-bubble-text" id="mc-cat-text">喵！点一下我，每次都有新惊喜喵 ♥</span>
+            <span class="mc-bubble-tail"></span>
+          </div>
+
+          <!-- 动态小猫交互舞台 -->
+          <div class="mc-cat-stage" id="mc-cat-stage" role="button" tabindex="0" aria-label="点击小猫摸摸它，有动作回款">
+            <img
+              id="mc-cat-img"
+              src="data:image/png;base64,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"
+              width="480"
+              height="320"
+              alt="戴薄荷绿围巾的像素小猫">
+            <div class="mc-coin-layer" id="mc-coin-layer"></div>
+          </div>
+          <small class="mc-cat-caption">小小一朵云，装得下你的奇思妙想 · 点一下小猫摸摸它 ✦</small>
+        </div>
+      </section>
+
+      <div class="mc-ticker">
+        <span>✦ 云响系统全天候运行 · 智能核验原站流水 · 额度秒级充回余额 · 异常争议人工快速审批</span>
+        <span class="mc-mono">SYSTEM: ALL SERVICES NOMINAL ↗</span>
+      </div>
+
+      <section class="mc-section" aria-labelledby="mc-service-title">
+        <div class="mc-heading">
+          <div>
+            <span class="mc-kicker">01 / CORE CAPABILITIES</span>
+            <h2 id="mc-service-title">核心业务能力</h2>
+          </div>
+          <small>空了有回响，额度回到余额。</small>
+        </div>
+
+        <div class="mc-services">
+          <div class="mc-card mc-card-blue">
+            <div class="mc-card-top">
+              <span class="mc-card-type">LOGS / 智能追踪</span>
+              <span class="mc-card-icon" aria-hidden="true">▦</span>
+            </div>
+            <h3>可补日志检索</h3>
+            <p>智能扫描原站空回复、未消费返回及连接断流流水，异常调用一目了然。</p>
+            <div class="mc-card-bottom">
+              <span>全量流水实时追溯</span>
+              <span class="mc-arrow" aria-hidden="true">↗</span>
+            </div>
+          </div>
+
+          <div class="mc-card mc-card-yellow">
+            <div class="mc-card-top">
+              <span class="mc-card-type">REFUND / 智能补额</span>
+              <span class="mc-card-icon" aria-hidden="true">+</span>
+            </div>
+            <h3>一键额度返还</h3>
+            <p>即时比对原站扣费凭证，符合规则的调用秒级自动充回钱包余额。</p>
+            <div class="mc-card-bottom">
+              <span>秒级自动对账到账</span>
+              <span class="mc-arrow" aria-hidden="true">↗</span>
+            </div>
+          </div>
+
+          <div class="mc-card mc-card-pink">
+            <div class="mc-card-top">
+              <span class="mc-card-type">AUDIT / 工单流转</span>
+              <span class="mc-card-icon" aria-hidden="true">⌁</span>
+            </div>
+            <h3>人工复核审批</h3>
+            <p>复杂长文本断流、流式争议由站长逐笔人工复核，结果清晰有据可查。</p>
+            <div class="mc-card-bottom">
+              <span>逐笔审核公开透明</span>
+              <span class="mc-arrow" aria-hidden="true">↗</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 快速登录终端机卡片 -->
+            <!-- 独立像素终端弹窗：用户点击进入工作台时才打开 -->
+      <dialog id="login-dialog" class="mc-login-dialog">
+        <div class="mc-windowbar">
+          <span>login-terminal.exe / 登录云响补偿工作台</span>
+          <button type="button" class="mc-dialog-close" id="close-login-dialog" aria-label="关闭窗口">✕</button>
+        </div>
+        <div class="mc-dialog-body">
+          <div class="mc-login-intro">
+            <span class="mc-eyebrow" style="margin-bottom:8px;">原站直连 · 安全鉴权</span>
+            <h2 style="font-size:22px;font-weight:900;margin:0 0 10px;">登录工作台</h2>
+            <p style="font-size:13px;color:#5d766a;line-height:1.8;margin:0 0 16px;">
+              使用已有的 <strong>云中猫API小站</strong> 账号登录，无需重新注册。<br>
+              系统直接向原站发起鉴权校验，密码不落库。
+            </p>
+            <div class="mc-feature-list">
+              <div class="mc-feature-item"><span>🔒</span> 密码不落库，安全无痕</div>
+              <div class="mc-feature-item"><span>⚡</span> 自动同步原站钱包余额与流水</div>
+              <div class="mc-feature-item"><span>🛡</span> 支持二次动态安全验证 (2FA)</div>
+            </div>
+          </div>
+
+          <div class="mc-login-box">
+            <form id="login-form">
+              <label>
+                云中猫API小站 用户名
+                <input name="username" autocomplete="username" required maxlength="100" placeholder="输入原站用户名">
+              </label>
+              <label>
+                原站密码
+                <input name="password" type="password" autocomplete="current-password" required maxlength="1024" placeholder="输入原站密码">
+              </label>
+              <label class="check-label remember-login">
+                <input name="remember" type="checkbox"> 保持登录 30 天
+              </label>
+              <button class="primary wide" type="submit">登录工作台 <span>→</span></button>
+            </form>
+            <form id="verify-form" hidden>
+              <label>
+                动态验证码
+                <input name="code" autocomplete="one-time-code" inputmode="numeric" required pattern="[0-9]{6,8}" placeholder="输入原站二次验证码">
+              </label>
+              <button class="primary wide" type="submit">验证并登录</button>
+            </form>
+            <p id="login-message" role="alert" class="error"></p>
+          </div>
+        </div>
+        <div class="mc-monitor">
+          <strong>🔒 安全提醒</strong>
+          <span>不创建独立账号 · 密码不落库 · 实际补偿以原消费核验及审核结果为准</span>
+        </div>
+      </dialog>
+
+      <!-- 补偿规则与常见问题 FAQ -->
+      <section class="mc-friends" id="rules-section" aria-labelledby="mc-rules-title" style="border-top:none;padding-top:10px;">
+        <div class="mc-heading">
+          <div>
+            <span class="mc-kicker">02 / COMPENSATION RULES</span>
+            <h2 id="mc-rules-title">补偿规则与常见疑问</h2>
+          </div>
+          <small>透明核验，安心使用</small>
+        </div>
+
+        <details open style="margin-top:14px;">
+          <summary>常见问题与补偿细则（点击展开 / 收起）</summary>
+          <div class="mc-detail">
+            <section>
+              <h3>哪些情况可以申请补偿？</h3>
+              <ul>
+                <li><strong>空回复异常：</strong>状态码 200 但内容为空或输出错误代码，且扣除了额度。</li>
+                <li><strong>网络或上游断流：</strong>模型生成中途异常中断，未获取完整结果。</li>
+                <li><strong>系统误扣：</strong>经系统对比未消费但产生账单的记录。</li>
+              </ul>
+              <p>所有补偿记录均由系统调用原站消费流水真实核验，杜绝虚假与重复补偿。</p>
+            </section>
+
+            <section>
+              <h3>额度返还到哪里？多久到账？</h3>
+              <ul>
+                <li><strong>自动秒级充回：</strong>符合自动化核验规则的记录，一键点击后秒级直接充回原站钱包余额。</li>
+                <li><strong>异常人工流转：</strong>涉及大额对话或特殊订阅额度的争议，进入站长工单复核，通常在 24 小时内完成。</li>
+                <li><strong>账本透明：</strong>可在工作台“补偿记录”中逐笔查看处理结果与原站流水号。</li>
+              </ul>
+            </section>
+          </div>
+        </details>
+      </section>
+
+      <!-- 原站连接与状态 -->
+      <section class="mc-api" aria-labelledby="mc-api-title">
+        <div class="mc-windowbar">
+          <span>connection.txt / 原站 API 接口信息</span>
+          <span class="mc-window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        </div>
+        <div class="mc-api-body">
+          <div>
+            <h2 id="mc-api-title">原站 API 地址</h2>
+            <small>云中猫官方接口基址。</small>
+          </div>
+          <div>
+            <label class="mc-input-label" for="mc-endpoint">
+              <span>BASE URL</span>
+              <span>全选或长按复制</span>
+            </label>
+            <input id="mc-endpoint" aria-label="API 接入地址" type="text" readonly spellcheck="false" value="https://api.Yzmao.Cn/v1">
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;border-top:1px dashed #afc6b7;">
+          <a class="mc-monitor" style="border-top:none;flex:1;" href="https://api.Yzmao.Cn/model-status" target="_blank" rel="noopener noreferrer">
+            <strong>▥ &nbsp; 模型监控 ↗</strong>
+            <span>出发之前，看看模型运行状态。</span>
+          </a>
+          <a class="mc-monitor" style="border-top:none;flex:1;border-left:1px dashed #afc6b7;" href="https://api.Yzmao.Cn/pricing" target="_blank" rel="noopener noreferrer">
+            <strong>▦ &nbsp; 模型广场 ↗</strong>
+            <span>挑选适合创作的灵感搭档。</span>
+          </a>
+        </div>
+      </section>
     </div>
-    <div class="login-form-wrap"><div class="login-card"><span class="eyebrow">WELCOME BACK</span><h2>登录补偿工作台</h2><p class="muted">使用已有的 云中猫API小站 账号，无需重新注册。</p>
-      <form id="login-form"><label>云中猫API小站 用户名<input name="username" autocomplete="username" required maxlength="100" placeholder="输入原站用户名"></label><label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="1024" placeholder="输入原站密码"></label><label class="check-label remember-login"><input name="remember" type="checkbox">保持登录 30 天</label><button class="primary wide" type="submit">登录工作台 <span>→</span></button></form>
-      <form id="verify-form" hidden><label>动态验证码<input name="code" autocomplete="one-time-code" inputmode="numeric" required pattern="[0-9]{6,8}" placeholder="输入原站二次验证码"></label><button class="primary wide" type="submit">验证并登录</button></form>
-      <p id="login-message" role="alert" class="error"></p><div class="login-note">不创建独立账号 · 密码不落库<br>实际补偿以原消费核验及审核结果为准</div>
-    </div></div>
-  </section>
+
+    <!-- 社群区域 -->
+    <section class="mc-community" aria-labelledby="mc-community-title">
+      <div class="mc-shell">
+        <div class="mc-heading">
+          <div>
+            <span class="mc-kicker">03 / MEET YOUR PEOPLE</span>
+            <h2 id="mc-community-title">云边有座小小聊天室</h2>
+          </div>
+          <p class="mc-community-desc">交流留在官方群，重要消息记得看通知群。</p>
+        </div>
+
+        <div class="mc-groups">
+          <div class="mc-group">
+            <span class="mc-group-type">CHAT ROOM / 官方交流</span>
+            <h3>云边有只猫</h3>
+            <div class="mc-group-bottom">
+              <span class="mc-group-number">QQ · 1127198788</span>
+              <a class="mc-join" href="https://qm.qq.com/q/xlN4Lb8Y6c" target="_blank" rel="noopener noreferrer">
+                加入官方群 <span aria-hidden="true">↗</span>
+              </a>
+            </div>
+          </div>
+
+          <div class="mc-group">
+            <span class="mc-group-type">NOTICE BOARD / 重要消息</span>
+            <h3>云中猫api通知群</h3>
+            <div class="mc-group-bottom">
+              <span class="mc-group-number">QQ · 1126854827</span>
+              <a class="mc-join" href="https://qm.qq.com/q/bbPUTG1aso" target="_blank" rel="noopener noreferrer">
+                加入通知群 <span aria-hidden="true">↗</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="mc-footer">
+        <strong>云响 / YUNXIANG API COMPENSATION</strong>
+        <span>原站额度 · 自动核验 · 异常审批</span>
+        <span>空了回应，不空想念。</span>
+      </footer>
+    </div>
+  </main>
   <div id="workspace" class="workspace" hidden>
     <button id="drawer-backdrop" class="drawer-backdrop" aria-label="关闭导航" hidden tabindex="-1"></button>
     <aside class="sidebar" id="console-navigation" aria-label="工作台导航"><div class="drawer-brand"><div class="brand"><span class="brand-icon" data-brand-logo><i data-lucide="cloud"></i></span> 云响</div><button id="drawer-close" class="ghost icon-button" aria-label="关闭菜单" title="关闭菜单"><i data-lucide="x"></i></button></div><nav id="nav" aria-label="主导航"></nav><div class="sidebar-bottom"><button id="logout" class="ghost logout-button"><i data-lucide="log-out"></i>退出</button></div></aside>
-    <div class="main-shell"><header class="topbar"><div class="topbar-location"><button id="menu-toggle" class="ghost icon-button" aria-label="切换导航" title="菜单" aria-controls="console-navigation" aria-expanded="false"><i data-lucide="menu"></i></button><strong class="mobile-brand">云响</strong><span class="breadcrumb">工作台 <b>/</b> <span id="breadcrumb">我的概览</span></span></div><div class="account"><button id="search-toggle" class="ghost icon-button" aria-label="搜索页面或功能" title="搜索页面或功能"><i data-lucide="search"></i></button><button id="theme-toggle" class="ghost icon-button" aria-label="切换浅色模式" title="切换主题"></button><button id="account-toggle" class="avatar-button" aria-label="账号菜单" aria-expanded="false" aria-controls="account-menu">回</button><div id="account-menu" class="account-menu" hidden><strong id="account-name"></strong><button data-nav="overview"><i data-lucide="user"></i>个人概览</button><button data-nav="rules"><i data-lucide="shield-check"></i>补偿规则</button><button id="account-logout"><i data-lucide="log-out"></i>退出登录</button></div></div></header>
+    <div class="main-shell"><header class="topbar"><div class="topbar-location"><button id="menu-toggle" class="ghost icon-button" aria-label="切换导航" title="菜单" aria-controls="console-navigation" aria-expanded="false"><i data-lucide="menu"></i></button><strong class="mobile-brand">云响</strong><span class="breadcrumb">工作台 <b>/</b> <span id="breadcrumb">我的概览</span></span></div><div class="account"><button id="search-toggle" class="ghost icon-button" aria-label="搜索页面或功能" title="搜索页面或功能"><i data-lucide="search"></i></button><button id="account-toggle" class="avatar-button" aria-label="账号菜单" aria-expanded="false" aria-controls="account-menu">回</button><div id="account-menu" class="account-menu" hidden><strong id="account-name"></strong><button data-nav="overview"><i data-lucide="user"></i>个人概览</button><button data-nav="rules"><i data-lucide="shield-check"></i>补偿规则</button><button id="account-logout"><i data-lucide="log-out"></i>退出登录</button></div></div></header>
       <main><div class="page-heading"><div><span class="eyebrow" id="page-kicker">WORKSPACE</span><h1 id="page-title">我的概览</h1><p id="page-subtitle" class="muted"></p></div><button id="refresh" class="secondary">↻ 刷新</button></div><section id="content" aria-live="polite"></section><footer>云响 · 云中猫API小站 补空回 <span>原站额度 · 自动核验 · 异常审批</span></footer></main>
     </div>
   </div>

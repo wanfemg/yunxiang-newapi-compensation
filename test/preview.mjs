@@ -3,6 +3,11 @@ import { Store } from '../src/store.mjs';
 import { createApplication } from '../src/server.mjs';
 import { mockServer, rules, user, log } from './helpers.mjs';
 export const remote=await mockServer(),store=new Store();store.saveRules(rules(),1,1);
+const previewQueryDelay=Number(process.env.PREVIEW_QUERY_DELAY_MS)||0;
+if(previewQueryDelay>0){
+  const queryLogs=remote.upstream.logs.bind(remote.upstream);
+  remote.upstream.logs=async query=>{await new Promise(resolve=>setTimeout(resolve,previewQueryDelay));return queryLogs(query);};
+}
 remote.data.logs.push(log('fixture-request-2',{quota:240,other:'{}'}),log('fixture-request-3',{quota:160,completion_tokens:30}));
 remote.data.logs.push(log('fixture-self-service',{quota:80}));
 store.create(log(),user,rules(),'本地 UI 验证数据，非真实消费','self',7);

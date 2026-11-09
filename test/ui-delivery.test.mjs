@@ -26,7 +26,7 @@ test('HTML 与未版本化资源不缓存，整个模块依赖图使用同一内
   assert.match(html.headers.get('cache-control'),/no-store/);
   const version=(await (await f.request('/api/ui-version')).json()).data.version;
   assert.match(version,/^[a-f0-9]{16}$/);assert.ok(text.includes('content="'+version+'"'));
-  for(const name of ['style.css','glass.css','icons.js','app.js'])assert.ok(text.includes('/assets/'+version+'/'+name));
+  for(const name of ['style.css','glass.css','pixel.css','icons.js','app.js'])assert.ok(text.includes('/assets/'+version+'/'+name));
   const script=await f.request('/assets/'+version+'/app.js');assert.match(script.headers.get('cache-control'),/immutable/);
   const imports=[...(await script.text()).matchAll(/from '[.]\/([^']+)'/g)].map(m=>m[1]);assert.ok(imports.includes('notification-center.js'));assert.ok(imports.includes('ui-version.js'));
   for(const name of imports){const response=await f.request('/assets/'+version+'/'+name);assert.equal(response.status,200);assert.match(response.headers.get('cache-control'),/immutable/);}

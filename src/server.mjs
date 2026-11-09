@@ -17,7 +17,7 @@ import { normalizeAIBaseURL } from './ai-review.mjs';
 import {notificationMarkdown} from './notification-titles.mjs';
 
 const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
-const assetNames = ['app.js','style.css','glass.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','user-inbox.js','audit-log.js','query-batches.js','ui-version.js','ai-result.js','amount-panel.js'];
+const assetNames = ['cat-interactive.js','app.js','style.css','glass.css','pixel.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','user-inbox.js','audit-log.js','query-batches.js','ui-version.js','ai-result.js','amount-panel.js'];
 const assetContents = new Map(['index.html',...assetNames].map(name=>[name,readFileSync(join(publicDirectory,name))]));
 const uiVersion = createHash('sha256').update([...assetContents.values()].join('\0')).digest('hex').slice(0,16);
 const staticFiles = new Set(['/', ...assetNames.map(name=>'/'+name)]);
@@ -87,7 +87,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         const content = assetContents.get(file);
         if(file==='index.html'){
           const versioned=content.toString('utf8').replace('<head>', '<head>\n  <meta name="application-origin" content="'+expectedOrigin+'">\n  <meta name="ui-version" content="'+uiVersion+'">')
-            .replace(/(href|src)="\/(style\.css|glass\.css|icons\.js|app\.js)"/g,'$1="/assets/'+uiVersion+'/$2"');
+            .replace(/(href|src)="\/(style\.css|glass\.css|pixel\.css|icons\.js|app\.js)"/g,'$1="/assets/'+uiVersion+'/$2"');
           res.setHeader('Cache-Control','no-store, no-cache, must-revalidate, max-age=0');
           res.setHeader('ETag',`"${uiVersion}"`);res.end(versioned);
         }else{
