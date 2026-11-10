@@ -195,12 +195,12 @@ export class Compensation {
     }
     this.store.event(claim.id,user.id,'self_service_routed',{route:decision.automatic?'automatic':'review',reasons:decision.reasons});
     if(!decision.automatic){
-      if(aiReview) this.store.notifyClaim('ai_manual_review',claim,`证据不足或未达到自动阈值，转管理员审核。${decision.reasons.join('；')}`);
+      if(aiReview) this.store.notifyClaim('ai_manual_review',claim,`未满足自动补偿条件，转管理员审核。${decision.reasons.join('；')}`);
       return this.view(this.store.transition(claim.id,['pending'],'pending',user.id,'异常转审批：'+decision.reasons.join('；')));
     }
     try{
       if(prepared)this.store.db.prepare('UPDATE claims SET batch_auto=1 WHERE id=?').run(claim.id);
-      this.store.transition(claim.id,['pending'],'approved',user.id,'系统自助核验通过，待二次核验');
+      this.store.transition(claim.id,['pending'],'approved',user.id,aiReview?'AI 判定空回且达到阈值，自动执行补偿':'系统自助核验通过，自动执行补偿');
       if(prepared)return this.view(this.store.get(claim.id));
       const result=await this.#execute(user,claim.id,claim.log.quota,'系统自助：空回证据、AI 判定、余额扣费、规则与限额核验',true);
       if(aiReview&&result.status==='succeeded')this.store.notifyClaim('ai_auto_compensation',result,`AI 高置信度判定为空回并已确认补额度。${aiReview.reason}`);

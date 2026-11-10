@@ -132,24 +132,26 @@ export function publicLog(log) {
 
 export function selfServiceDecision(log, user, rules, now = Date.now(), aiReview = null) {
   const assessment = assessLog(log, user, rules, now), reasons = [...assessment.reasons];
-  if(fundingSource(log)==='subscription')reasons.push('订阅消费须站长审批，批准并核验后补入钱包余额');
-  if(rules.retiredModelKeys?.includes(log.channel+':'+log.model_name))reasons.push('原消费模型已下架、删除或渠道停用，转人工审核');
-  if(rules.catalogUnavailable)reasons.push('渠道模型目录暂不可核验，转人工审核');
   let other;try{other=typeof log.other==='string'?JSON.parse(log.other):log.other;}catch{}
   if(!other||typeof other!=='object'||Array.isArray(other))other={};
   const reject=other.admin_info?.reject_reason||other.reject_reason;
-  if(!rules.selfServiceEnabled)reasons.push('自助返还已暂停');
   if(!rules.executionEnabled)reasons.push('返还执行暂未开放');
   if(rules.aiEnabled){
     if(aiReview?.status!=='completed')reasons.push(aiReview?'AI 判定未成功完成，转人工审核':'等待 AI 判定');
     else if(aiReview.decision==='not_empty')reasons.push('AI 判定为非空回，转人工审核；置信度不代表空回概率');
     else if(aiReview.decision!=='empty')reasons.push('AI 证据不足，无法确定是否空回，转人工审核；提高置信度不改变判定结论');
     else if(!Number.isFinite(aiReview.confidence)||aiReview.confidence<rules.aiAutoThreshold/100)reasons.push('AI 置信度未达到当前自动通过阈值 '+rules.aiAutoThreshold+'%，转人工审核');
-  }else if(assessment.evidence!=='empty_marked'||!['gemini_empty_candidates','empty_response'].includes(reject))reasons.push('缺少明确的上游空回证据');
-  if(other.billing_source!=='wallet'&&fundingSource(log)!=='subscription')reasons.push('余额消费来源尚未确认');
-  if((other.tool_calls&&(!Array.isArray(other.tool_calls)||other.tool_calls.length))||other.function_call||(other.tool_surcharges&&(!Array.isArray(other.tool_surcharges)||other.tool_surcharges.length))||other.image_output||other.audio_output||other.reasoning_tokens||other.thoughts_tokens)reasons.push('存在工具、多模态或推理输出，须人工核实');
+  }else{
+    if(fundingSource(log)==='subscription')reasons.push('订阅消费须站长审批，批准并核验后补入钱包余额');
+    if(rules.retiredModelKeys?.includes(log.channel+':'+log.model_name))reasons.push('原消费模型已下架、删除或渠道停用，转人工审核');
+    if(rules.catalogUnavailable)reasons.push('渠道模型目录暂不可核验，转人工审核');
+    if(!rules.selfServiceEnabled)reasons.push('自助返还已暂停');
+    if(assessment.evidence!=='empty_marked'||!['gemini_empty_candidates','empty_response'].includes(reject))reasons.push('缺少明确的上游空回证据');
+    if(other.billing_source!=='wallet'&&fundingSource(log)!=='subscription')reasons.push('余额消费来源尚未确认');
+    if((other.tool_calls&&(!Array.isArray(other.tool_calls)||other.tool_calls.length))||other.function_call||(other.tool_surcharges&&(!Array.isArray(other.tool_surcharges)||other.tool_surcharges.length))||other.image_output||other.audio_output||other.reasoning_tokens||other.thoughts_tokens)reasons.push('存在工具、多模态或推理输出，须人工核实');
+    if(now-log.created_at*1000<rules.selfServiceMinAgeSeconds*1000)reasons.push('尚未超过结算等待期');
+    if(log.quota>rules.selfServiceMaxQuota)reasons.push('原消费超过自助单笔上限');
+  }
   if(['refunded','refunded_quota','refund_quota','refund_amount','refund_status'].some(key=>other[key]!==undefined&&![false,0,'0','none','not_refunded'].includes(other[key])))reasons.push('存在退款或退款状态不明的标记');
-  if(now-log.created_at*1000<rules.selfServiceMinAgeSeconds*1000)reasons.push('尚未超过结算等待期');
-  if(log.quota>rules.selfServiceMaxQuota)reasons.push('原消费超过自助单笔上限');
   return {automatic:assessment.eligible&&reasons.length===0,reasons:[...new Set(reasons)]};
 }

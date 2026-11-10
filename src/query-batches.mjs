@@ -112,7 +112,7 @@ export class QueryBatches {
             throw new AppError('自动审核条件已变化，须管理员复核：'+decision.reasons.join('；'));
           }
         }
-        if(fundingSource(c.log)==='subscription'&&!c.confirmed_unreturned)throw new AppError('订阅消费仍需逐笔核实未退款金额');
+        if(!c.batch_auto&&fundingSource(c.log)==='subscription'&&!c.confirmed_unreturned)throw new AppError('订阅消费仍需逐笔核实未退款金额');
         const verified=c.confirmed_unreturned||expectedQuota(c.log,c.rules);
         entries.push({id:c.id,amount:Math.min(verified,expectedQuota(original,c.rules),expectedQuota(original,rules)),verifiedAmount:verified,note:c.verification_note||'整批审核完成，合并补额度'});
       }

@@ -4,6 +4,41 @@ import { AIReviewer, logFingerprint } from '../src/ai-review.mjs';
 import { Store } from '../src/store.mjs';
 import { admin, log, rules, user, fixture } from './helpers.mjs';
 
+function enablePassingAI(f,confidence=.95,decision='empty'){
+  f.service.ai=new AIReviewer({store:f.store,env:{AI_BASE_URL:'http://ai.test/v1',AI_API_KEY:'key',AI_MODEL:'fixture'},fetcher:async()=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({decision,confidence,reason:'根据日志综合判定'})}}]}))});
+}
+
+test('AI 达标直接补偿：不再要求旧自助条件和人工金额确认，单笔及查询批次一致',async t=>{
+  for(const other of [{},{billing_source:'wallet',tool_calls:[{name:'tool'}],reasoning_tokens:5},{billing_source:'subscription',subscription_id:8}]){
+    for(const batch of [false,true]){
+      const source=log('ai-direct',{other:JSON.stringify(other)});
+      const f=fixture({logs:[source],rules:{aiEnabled:true,aiAutoThreshold:95,selfServiceEnabled:false,selfServiceMaxQuota:1,selfServiceMinAgeSeconds:86400}});
+      t.after(()=>f.store.close());enablePassingAI(f);
+      if(batch){const b=(await f.service.logs(user,{refresh:true})).batches[0];const result=await f.service.batches.submit(user,b.id);assert.equal(result.status,'succeeded',result.note);}
+      else{const result=await f.service.selfService(user,source.request_id);assert.equal(result.status,'succeeded',result.review_note);}
+      assert.equal(f.calls(),1);assert.equal(f.store.byRequest(source.request_id).amount,120);
+      await f.service.selfService(user,source.request_id);assert.equal(f.calls(),1);
+    }
+  }
+});
+
+test('AI 达标仍检查已退款、执行开关和每日总限额；不达标或非空回转人工',async t=>{
+  for(const scenario of [
+    {other:{billing_source:'wallet',refunded:true}},
+    {rules:{executionEnabled:false}},
+    {rules:{userDailyQuota:100}},
+    {confidence:.94},
+    {decision:'not_empty'},
+    {decision:'uncertain'}
+  ]){
+    const source=log('ai-guard',{other:JSON.stringify(scenario.other||{})}),f=fixture({logs:[source],rules:{aiEnabled:true,aiAutoThreshold:95,...scenario.rules}});
+    t.after(()=>f.store.close());enablePassingAI(f,scenario.confidence,scenario.decision);
+    if(scenario.rules?.userDailyQuota){await assert.rejects(f.service.selfService(user,source.request_id),/当日额度或次数不足/);assert.equal(f.calls(),0);continue;}
+    const result=await f.service.selfService(user,source.request_id);
+    assert.equal(result.status,'pending');assert.equal(f.calls(),0);
+  }
+});
+
 test('AI 启用后低于已保存阈值的空回不能被原规则绕过', async t => {
   const f=fixture({rules:{aiEnabled:true}});t.after(()=>f.store.close());
   f.store.saveAIConfig({baseUrl:'http://ai.test/v1',apiKey:'key',model:'fixture',aiAutoThreshold:95,rulesVersion:f.store.rules().version},admin.id);
