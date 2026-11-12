@@ -23,7 +23,7 @@ export function fixture(options = {}) {
   return { store, upstream, service: new Compensation(store, upstream), logs, calls: () => calls };
 }
 export async function mockServer() {
-  const data = { logs: [log()], credits: [], disabled: false, mode: 'success' };
+  const data = { logs: [log()], credits: [], disabled: false, mode: 'success', identityCalls: 0 };
   const server = createServer(async (req,res) => {
     let body=''; for await(const chunk of req)body+=chunk; const b=body?JSON.parse(body):{};
     const url=new URL(req.url,'http://localhost');
@@ -37,6 +37,7 @@ export async function mockServer() {
     }
     const token=req.headers.authorization;
     if(url.pathname==='/api/user/self') {
+      data.identityCalls++;
       const u=token==='Bearer fixture-admin-token'?admin:(token==='Bearer fixture-user-token'||(data.legacyLogin&&req.headers.cookie==='session=legacy-7'))&&!data.disabled?user:null;
       return reply(u,Boolean(u));
     }

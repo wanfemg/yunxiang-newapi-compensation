@@ -142,8 +142,17 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       if (!session || session.expires < Date.now()) { sessions.delete(key); throw new AppError('请使用 云中猫API小站 账号登录', 401); }
       if (mutating && req.headers['x-csrf-token'] !== session.csrf) throw new AppError('请求凭据校验失败', 403);
       // Every request revalidates original identity/role; never trust browser roles.
-      let user; try { user = await upstream.identity(session.token, session.user.id); } catch (e) { sessions.delete(key); throw new AppError('原站登录已失效或暂不可用，请重新登录', 401); }
-      if (user.id !== session.user.id) { sessions.delete(key); throw new AppError('身份不一致', 401); }
+      let user;
+      try {
+        const identityCheck=session.identityCheck||(session.identityCheck=upstream.identity(session.token,session.user.id).then(current=>{
+          if(current.id!==session.user.id)throw Object.assign(new Error('身份不一致'),{identityMismatch:true});
+          return current;
+        }).finally(()=>{session.identityCheck=null;}));
+        user=await identityCheck;
+      } catch (e) {
+        sessions.delete(key);
+        throw e?.identityMismatch?new AppError('身份不一致',401):new AppError('原站登录已失效或暂不可用，请重新登录',401);
+      }
       session.user = user;
       if (path.startsWith('/api/admin/')) service.requireAdmin(user);
       if (path === '/api/me' && req.method === 'GET') return send({ user: cleanUser(user), csrf: session.csrf });

@@ -138,9 +138,13 @@ export function selfServiceDecision(log, user, rules, now = Date.now(), aiReview
   if(!rules.executionEnabled)reasons.push('返还执行暂未开放');
   if(rules.aiEnabled){
     if(aiReview?.status!=='completed')reasons.push(aiReview?'AI 判定未成功完成，转人工审核':'等待 AI 判定');
-    else if(aiReview.decision==='not_empty')reasons.push('AI 判定为非空回，转人工审核；置信度不代表空回概率');
-    else if(aiReview.decision!=='empty')reasons.push('AI 证据不足，无法确定是否空回，转人工审核；提高置信度不改变判定结论');
-    else if(!Number.isFinite(aiReview.confidence)||aiReview.confidence<rules.aiAutoThreshold/100)reasons.push('AI 置信度未达到当前自动通过阈值 '+rules.aiAutoThreshold+'%，转人工审核');
+    else {
+      const probability=aiReview.analysis?.emptyProbability;
+      const decision=Number.isFinite(probability)?probability>=rules.aiAutoThreshold/100?'empty':probability<=1-rules.aiAutoThreshold/100?'not_empty':'uncertain':aiReview.decision;
+      if(decision==='not_empty')reasons.push('AI 判定更倾向于非空回，转人工审核');
+      else if(decision!=='empty')reasons.push('AI 判定为空回的概率未达到自动补偿阈值 '+rules.aiAutoThreshold+'%，转人工审核');
+      else if(!Number.isFinite(aiReview.confidence)||aiReview.confidence<rules.aiAutoThreshold/100)reasons.push('AI 置信度未达到当前自动通过阈值 '+rules.aiAutoThreshold+'%，转人工审核');
+    }
   }else{
     if(fundingSource(log)==='subscription')reasons.push('订阅消费须站长审批，批准并核验后补入钱包余额');
     if(rules.retiredModelKeys?.includes(log.channel+':'+log.model_name))reasons.push('原消费模型已下架、删除或渠道停用，转人工审核');

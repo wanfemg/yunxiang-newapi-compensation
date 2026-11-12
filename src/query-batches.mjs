@@ -3,6 +3,12 @@ import { logFingerprint } from './ai-review.mjs';
 import { UpstreamError } from './newapi.mjs';
 
 const sameLog=(a,b)=>['request_id','type','user_id','quota','created_at','model_name','channel','prompt_tokens','completion_tokens','group','other'].every(key=>JSON.stringify(a[key])===JSON.stringify(b[key]));
+async function mapLimit(items,limit,fn){
+  let next=0;
+  await Promise.all(Array.from({length:Math.min(limit,items.length)},async()=>{
+    while(next<items.length){const index=next++;await fn(items[index],index);}
+  }));
+}
 
 export class QueryBatches {
   constructor(service) { this.service=service; this.store=service.store; this.jobs=new Map(); }
@@ -46,7 +52,8 @@ export class QueryBatches {
       for(const log of batch.logs)if(log.request_id)counts.set(log.request_id,(counts.get(log.request_id)||0)+1);
       if(logs.some(log=>counts.get(log.request_id)!==1))throw new AppError('存在重复原请求标识，禁止关联补偿，请管理员核实',409);
       this.store.enrollBatch(id,logs,user,rules,reason.trim(),user.id);
-      for(const claim of this.store.batchClaims(id)){
+      const claims=this.store.batchClaims(id);
+      await mapLimit(claims,4,async claim=>{
         try{
           const original=await this.service.upstream.log(claim.request_id);
           if(!sameLog(original,claim.log))throw new AppError('原消费发生变化，转人工核实');
@@ -57,7 +64,7 @@ export class QueryBatches {
           const current=this.store.get(claim.id);
           if(current.status==='pending')this.store.transition(claim.id,['pending'],'pending',user.id,error instanceof AppError?error.message:'原消费暂不可核验，转人工审核');
         }
-      }
+      });
       await this.finishJudging(user,id);
       return this.view(user,id);
     });

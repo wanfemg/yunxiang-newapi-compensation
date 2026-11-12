@@ -102,6 +102,15 @@ test('保持登录使用 30 天会话，普通登录保持默认时长',async t=
  assert.match(remembered.cookie,/Max-Age=2592000/);
 });
 
+test('同屏并发 API 请求合并身份核验，后续请求仍重新核验',async t=>{
+ const f=await setup(t),u=await f.login(user),before=f.remote.data.identityCalls;
+ const [me,overview]=await Promise.all([f.request('/api/me',u),f.request('/api/overview',u)]);
+ assert.equal(me.status,200);assert.equal(overview.status,200);
+ assert.equal(f.remote.data.identityCalls-before,1);
+ await f.request('/api/me',u);
+ assert.equal(f.remote.data.identityCalls-before,2);
+});
+
 test('AI 配置经真实 HTTP 拉取模型并验证所选模型推理，空回复和鉴权错误均不成功',async t=>{
   const f=await setup(t),a=await f.login(admin),u=await f.login(user),calls=[];
   let mode='ok';

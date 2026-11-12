@@ -14,13 +14,25 @@ async function queried(f){return (await f.service.logs(user,{refresh:true})).bat
 test('真实 AI 同批限额为一次：通过先补，其余人工审核后仅补剩余',async t=>{
   const credits=[],f=fixture({logs:[log('pass'),log('unsure',{id:101})],rules:{aiEnabled:true,aiDailyLimit:1,userDailyCount:1},credit:(...args)=>credits.push(args)});t.after(()=>f.store.close());
   const {AIReviewer}=await import('../src/ai-review.mjs');let reviews=0;
-  f.service.ai=new AIReviewer({store:f.store,env:{AI_BASE_URL:'http://ai.test/v1',AI_API_KEY:'fixture',AI_MODEL:'fixture'},fetcher:async()=>{reviews++;return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({decision:reviews===1?'empty':'uncertain',confidence:.95,reason:'日志判定'})}}]}));}});
+  f.service.ai=new AIReviewer({store:f.store,env:{AI_BASE_URL:'http://ai.test/v1',AI_API_KEY:'fixture',AI_MODEL:'fixture'},fetcher:async()=>{reviews++;return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({empty_probability:reviews===1?.95:.5,reason:'日志判定'})}}]}));}});
   const b=await queried(f),out=await f.service.batches.submit(user,b.id);
   assert.equal(reviews,2);assert.equal(out.status,'review');assert.equal(out.paidAmount,120);assert.equal(out.pendingAmount,120);assert.deepEqual(credits,[[user.id,120]]);
   const remaining=f.store.batchClaims(b.id).find(c=>c.status==='pending');assert.ok(remaining);
   f.service.review(admin,remaining.id,'approve','核实空回');await f.service.batches.settle(admin,b.id);
   assert.deepEqual(credits,[[user.id,120],[user.id,120]]);assert.equal(f.store.queryBatch(b.id).amount,240);assert.equal(f.store.overview(user.id).today.count,1);assert.equal(f.store.overview(user.id).today.quota,240);
   await f.service.batches.settle(admin,b.id);await f.service.batches.submit(user,b.id);assert.equal(credits.length,2);
+});
+test('批次 AI 审核并发提速且限制为 4 个同时请求',async t=>{
+  const logs=Array.from({length:8},(_,i)=>log('parallel-'+i,{id:i+1}));
+  const f=fixture({logs,rules:{aiEnabled:true,aiDailyLimit:1,userDailyCount:20},credit:()=>{}});t.after(()=>f.store.close());
+  const {AIReviewer}=await import('../src/ai-review.mjs');let active=0,maxActive=0;
+  f.service.ai=new AIReviewer({store:f.store,env:{AI_BASE_URL:'http://ai.test/v1',AI_API_KEY:'fixture',AI_MODEL:'fixture'},fetcher:async()=>{
+    active++;maxActive=Math.max(maxActive,active);
+    await new Promise(resolve=>setTimeout(resolve,30));active--;
+    return new Response(JSON.stringify({choices:[{message:{content:'{"empty_probability":0.95,"reason":"日志判定"}'}}]}));
+  }});
+  const batch=await queried(f),result=await f.service.batches.submit(user,batch.id);
+  assert.equal(result.status,'succeeded');assert.equal(maxActive,4);
 });
 test('一次查询跨多个模型和分页：全部判定结束，只向原站合计加额度一次',async t=>{
   const credits=[],f=fixture({logs:Array.from({length:35},(_,i)=>log('multi-'+i,{id:i,quota:2,model_name:i%2?'a':'b'})),rules:{models:['a','b'],userDailyCount:1,maxPending:1},credit:(...args)=>credits.push(args)});t.after(()=>f.store.close());

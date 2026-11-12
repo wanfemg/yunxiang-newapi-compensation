@@ -67,7 +67,9 @@ export class Compensation {
       const day = usage.get(log.user_id);
       if (day.today.count >= r.userDailyCount || day.today.quota + assessment.expectedQuota > r.userDailyQuota || day.siteToday.count >= r.siteDailyCount || day.siteToday.quota + assessment.expectedQuota > r.siteDailyQuota) reasons.push('当日额度或次数不足');
       if (c) reasons.push('已有申请，查看处理进度');
-      const decision=selfServiceDecision(log,{id:log.user_id},r);
+      const decision=r.aiEnabled
+        ?{automatic:false,reasons:['提交申请后由 AI 按当前阈值自动判定并处理']}
+        :selfServiceDecision(log,{id:log.user_id},r);
       return { log: admin ? log : publicLog(log), assessment: { ...assessment, reasons, canApply: assessment.eligible && reasons.length === 0, route:decision.automatic?'automatic':'review', reviewReasons:decision.reasons }, claim: c ? { id: c.id, status: c.status } : null };
     });
     if (!admin) {
@@ -189,9 +191,10 @@ export class Compensation {
     }
     const decision=selfServiceDecision(claim.log,user,await this.ruleContext([claim.log]),Date.now(),aiReview);
     if (aiReview) {
-      this.store.event(claim.id,user.id,'ai_reviewed',{decision:aiReview.decision,confidence:aiReview.confidence,reason:aiReview.reason,status:aiReview.status});
-      const confidence = `${Math.round(Number(aiReview.confidence || 0) * 100)}%`;
-      this.store.notifyClaim('ai_reviewed',claim,`AI 判定：${aiReview.decision}，置信度 ${confidence}。${aiReview.reason}`);
+      const probability=aiReview.analysis?.emptyProbability;
+      this.store.event(claim.id,user.id,'ai_reviewed',{decision:aiReview.decision,confidence:aiReview.confidence,...(Number.isFinite(probability)?{emptyProbability:probability}:{}),reason:aiReview.reason,status:aiReview.status});
+      const score=Number.isFinite(probability)?`空回概率 ${Math.round(probability*100)}%`:`置信度 ${Math.round(Number(aiReview.confidence||0)*100)}%`;
+      this.store.notifyClaim('ai_reviewed',claim,`AI 判定：${aiReview.decision}，${score}。${aiReview.reason}`);
     }
     this.store.event(claim.id,user.id,'self_service_routed',{route:decision.automatic?'automatic':'review',reasons:decision.reasons});
     if(!decision.automatic){

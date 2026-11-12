@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
-import { AppError } from './rules.mjs';
+import { AppError, assessLog, expectedQuota, fundingSource } from './rules.mjs';
 
 const decisionSet = new Set(['empty', 'not_empty', 'uncertain']);
 const recommendationSet = new Set(['approve','reject','manual']);
 const safe = (value, max = 4000) => String(value ?? '').slice(0, max);
-const DEFAULT_PROMPT = '你是额度补偿审核助手。只根据提供的日志和规则判断是否疑似空回，不决定金额，不执行任何操作。必须只返回 JSON：{"decision":"empty|not_empty|uncertain","confidence":0到1,"reason":"简短中文理由","evidence":["证据"]}。证据不足必须返回 uncertain。';
+const DEFAULT_PROMPT = '你是额度补偿审核助手。结合消费日志、系统提取的信号和补偿规则判断该日志是否为空回。自动初审与管理员复核会分别提供各自的输出格式要求。只引用输入中存在的事实，不决定补偿金额，不执行补偿操作。';
+const AUTO_REVIEW_GUIDANCE = '\n\n自动判定执行准则：主要输出 empty_probability，即“该日志确属空回”的概率，范围 0 到 1；这不是对 uncertain 标签的信心，也不是对任意结论的置信度。系统已筛出已扣费且 completion_tokens=0 的候选日志，并提供结构化核验结果。综合日志字段、knownSignals、reject_reason、退款、工具/多模态/推理信号和规则评估概率。日志完整、已扣费、输出 token 为零且无退款或成功输出证据时，应给高概率；发现成功输出、退款或明确矛盾证据时给低概率；仅关键字段缺失或证据实质矛盾时才给中间概率。站长设置的自动补偿阈值为 {{AI_AUTO_THRESHOLD}}%：empty_probability 达到或超过该值即为空回并自动补偿；低于该值转管理员复核。不得以 uncertain 标签覆盖达到阈值的概率，不得把“对不确定结论有信心”当成空回概率。必须只返回 JSON：{"empty_probability":0到1,"reason":"简短中文判断原因","evidence":["引用具体日志字段和值"]}。不得编造日志事实。';
 const ADMIN_PROMPT = '\n\n当前任务是站长的二次复核：独立核对消费日志、补偿规则和 previousReview 中的初审结论，指出初审是否与事实一致，不得把初审结论当作事实。综合评估证据是否足以通过申请，说明仍需人工核查的风险。只返回 JSON：{"decision":"empty|not_empty|uncertain","confidence":0到1,"recommendation":"approve|reject|manual","summary":"综合判断","reason":"判断原因","evidence":["逐条可核对的依据"]}。仅当日志和规则均支持空回、证据充分且无明显风险时 recommendation 才可为 approve；明确不符合规则时为 reject；证据不足、矛盾或结果不确定时为 manual。不得决定金额，不得执行操作。';
 
 export function normalizeAIBaseURL(value) {
@@ -33,7 +34,7 @@ export class AIReviewer {
   promptVersion(mode='automatic') {
     const custom = String(this.store?.aiConfig?.(this.env).prompt ?? this.env.AI_PROMPT ?? '').trim();
     const version=String(this.env.AI_PROMPT_VERSION || (custom ? createHash('sha256').update(this.config().prompt).digest('hex').slice(0,16) : 'empty-v1'));
-    return mode==='admin'?version+'-admin-assist-v1':version;
+    return mode==='admin'?version+'-admin-assist-v1':version+'-auto-review-v3';
   }
   config() {
     const stored = this.store?.aiConfig?.(this.env) || {};
@@ -145,29 +146,35 @@ export class AIReviewer {
       decision: 'uncertain', confidence: 0, reason: 'AI 服务未配置，转管理员审核', evidence: [], rawResponse: null, status: 'fallback'
     });
     const config = this.config();
+    const assessment = assessLog(log,{id:log.user_id},rules,this.now());
+    let other;try{other=typeof log.other==='string'?JSON.parse(log.other||'{}'):log.other||{};}catch{other={};}
     const payload = {
       model: config.model,
       temperature: 0,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: config.prompt+(mode==='admin'?ADMIN_PROMPT:'') },
-        { role: 'user', content: JSON.stringify({ log: { request_id: log.request_id, user_id: log.user_id, model_name: log.model_name, channel: log.channel, quota: log.quota, prompt_tokens: log.prompt_tokens, completion_tokens: log.completion_tokens, is_stream: log.is_stream, created_at: log.created_at, other: safe(log.other) }, rules: { refundBasisPoints: rules.refundBasisPoints, selfServiceMaxQuota: rules.selfServiceMaxQuota, selfServiceMinAgeSeconds: rules.selfServiceMinAgeSeconds, excludedModels: rules.excludedModels, models: rules.models },...(mode==='admin'?{previousReview:previousReview?{decision:previousReview.decision,confidence:previousReview.confidence,reason:previousReview.reason,evidence:previousReview.evidence}:null}: {}) }) }
+        { role: 'system', content: config.prompt+(mode==='admin'?ADMIN_PROMPT:AUTO_REVIEW_GUIDANCE.replace('{{AI_AUTO_THRESHOLD}}',String(rules.aiAutoThreshold))) },
+        { role: 'user', content: JSON.stringify({ log: { request_id: log.request_id, user_id: log.user_id, model_name: log.model_name, channel: log.channel, quota: log.quota, prompt_tokens: log.prompt_tokens, completion_tokens: log.completion_tokens, is_stream: log.is_stream, created_at: log.created_at, other: safe(log.other) }, knownSignals:{candidate:assessment.candidate,eligible:assessment.eligible,evidence:assessment.evidence,ruleReasons:assessment.reasons,expectedQuota:assessment.expectedQuota,fundingSource:fundingSource(log),rejectReason:safe(other.admin_info?.reject_reason||other.reject_reason||'',500),hasToolOutput:Boolean(other.tool_calls?.length||other.function_call||other.tool_surcharges?.length),hasMultimodalOrReasoningOutput:Boolean(other.image_output||other.audio_output||other.reasoning_tokens||other.thoughts_tokens),hasRefundMarker:['refunded','refunded_quota','refund_quota','refund_amount','refund_status'].some(key=>other[key]!==undefined&&![false,0,'0','none','not_refunded'].includes(other[key]))}, rules: { aiAutoThreshold:rules.aiAutoThreshold,refundBasisPoints: rules.refundBasisPoints, perRecordQuota:rules.perRecordQuota,perBatchQuota:rules.perBatchQuota,excludedModels: rules.excludedModels, models: rules.models },...(mode==='admin'?{previousReview:previousReview?{decision:previousReview.decision,confidence:previousReview.confidence,reason:previousReview.reason,evidence:previousReview.evidence}:null}: {}) }) }
       ]
     };
     try {
       const content = await this.chat(payload.messages, {temperature: payload.temperature, response_format: payload.response_format}, config);
       const parsed = JSON.parse(content);
-      const decision = decisionSet.has(parsed?.decision) ? parsed.decision : 'uncertain';
-      const confidence = Math.max(0, Math.min(1, Number(parsed?.confidence) || 0));
+      const probability=Number(parsed?.empty_probability);
+      const hasProbability=Number.isFinite(probability)&&probability>=0&&probability<=1;
+      const confidence=hasProbability?Math.max(probability,1-probability):Math.max(0,Math.min(1,Number(parsed?.confidence)||0));
+      const decision=hasProbability
+        ?probability>=rules.aiAutoThreshold/100?'empty':probability<=1-rules.aiAutoThreshold/100?'not_empty':'uncertain'
+        :mode==='automatic'?'uncertain':decisionSet.has(parsed?.decision)?parsed.decision:'uncertain';
       const analysis=mode==='admin'?{
         recommendation:recommendationSet.has(parsed?.recommendation)?parsed.recommendation:'manual',
         summary:safe(parsed?.summary,1200)||'AI 未提供综合判断'
       }:null;
       return this.store.saveAiReview({
         requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion, reviewBatchId: batchId,
-        decision, confidence, reason: safe(parsed?.reason, 1000) || 'AI 未提供理由',
+        decision, confidence, reason: !hasProbability&&mode==='automatic'?`AI 未返回有效空回概率，转管理员审核。${safe(parsed?.reason,800)}`:safe(parsed?.reason, 1000)||safe(parsed?.summary,1000)||'AI 未提供理由',
         evidence: Array.isArray(parsed?.evidence) ? parsed.evidence.slice(0, 12).map(v => safe(v, 300)) : [],
-        rawResponse: safe(content, 8000), status: 'completed',analysis
+        rawResponse: safe(content, 8000), status: 'completed',analysis:hasProbability?{...analysis,emptyProbability:probability}:analysis
       });
     } catch (error) {
       return this.store.saveAiReview({
