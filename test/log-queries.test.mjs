@@ -41,6 +41,14 @@ test('秒级接续：六月一日成功截止加一秒至六月七日点击时�
   now=Date.parse('2026-06-07T12:00:00+08:00');await scanner.read(user,{refresh:true},15*24);
   assert.equal(f.calls[1].start,first.end+1);assert.equal(f.calls[1].end,now/1000);
 });
+test('首次查询不早于管理员开放消费起点，并返回实际覆盖范围',async t=>{
+  const f=setup(t);const now=Date.parse('2026-07-01T12:30:00+08:00'),earliest=Date.parse('2026-06-29T08:00:00+08:00')/1000;
+  const out=await new LogQueries(f.store,f.upstream,()=>now).read(user,{},15*24,{consumptionStart:earliest});
+  assert.equal(f.calls[0].start,earliest);
+  assert.deepEqual(out.coverage,[{start:earliest,end:now/1000}]);
+  assert.deepEqual(out.window,{start:earliest,end:now/1000});
+  assert.deepEqual(out.gaps,[]);
+});
 test('旧日志保留，已覆盖的延迟日志不重扫，翻页与同秒点击不拉取',async t=>{
   const f=setup(t,[log('old')]);const first=await f.service.logs(user,{}),end=first.queryProgress.end;
   await f.service.logs(user,{refresh:true});assert.equal(f.calls.length,1);
@@ -76,10 +84,72 @@ test('并发查询串行，晚点击只补尾段，空查询也推进',async t=>
   const first=f.service.logs(user,{refresh:true});await started;const end=f.calls.at(-1).end;f.advance(2000);f.logs.push(log('tail',{created_at:end+1}));
   const second=f.service.logs(user,{refresh:true});release();await first;assert.equal((await second).items[0].log.request_id,'tail');assert.equal(f.calls.at(-1).start,end+1);assert.equal(f.calls.length,3);
 });
-test('窗口收窄跳过过期时间，扩大不回扫，进度不随缓存过期',async t=>{
+test('窗口收窄跳过过期时间，进度不随缓存过期',async t=>{
   const f=setup(t);const scanner=new LogQueries(f.store,f.upstream,f.clock);await scanner.read(user,{},72);
   f.advance(4*86400000);await scanner.read(user,{refresh:true},24);assert.equal(f.calls[1].start,Math.floor(f.clock()/1000)-86400);
-  f.store.db.exec('DELETE FROM log_query_cache');f.advance(1000);await scanner.read(user,{refresh:true},15*24);assert.equal(f.calls[2].start,Math.floor(f.clock()/1000));
+  f.store.db.exec('DELETE FROM log_query_cache');f.advance(1000);await scanner.read(user,{refresh:true},24);assert.equal(f.calls[2].start,Math.floor(f.clock()/1000));
+});
+test('扩大窗口只补新增左侧缺口及新尾段，不重复已覆盖时间',async t=>{
+  const f=setup(t);const scanner=new LogQueries(f.store,f.upstream,f.clock),first=await scanner.read(user,{},24);
+  f.advance(10000);const current=Math.floor(f.clock()/1000),oldStart=first.window.start;
+  const cached=await scanner.read(user,{},48);assert.equal(f.calls.length,1);
+  assert.deepEqual(cached.gaps,[{start:current-172800,end:oldStart-1},{start:first.end+1,end:current}]);
+  const out=await scanner.read(user,{refresh:true},48);
+  assert.deepEqual(f.calls.slice(1).map(q=>({start:q.start,end:q.end})),[{start:current-172800,end:oldStart-1},{start:first.end+1,end:current}]);
+  assert.deepEqual(out.coverage,[{start:current-172800,end:current}]);assert.deepEqual(out.gaps,[]);assert.equal(out.coverageStart,current-172800);
+});
+test('管理员定向补查发现迟到日志，展示行号变化不重复入批且不推进普通游标',async t=>{
+  const f=setup(t,[log('old')]),scanner=new LogQueries(f.store,f.upstream,f.clock),first=await scanner.read(user,{},72);
+  const originalBatch=first.items[0].query_batch_id,from=first.end-600;
+  f.logs[0].id=888;
+  f.logs.push(log('late',{id:102,created_at:first.end-20}));
+  f.advance(60000);
+  const out=await scanner.targetedBackfill(user,{start:from,end:first.end},72);
+  assert.equal(out.end,first.end);assert.equal(out.backfill.added,1);
+  assert.equal(out.items.find(row=>row.request_id==='old').query_batch_id,originalBatch);
+  assert.deepEqual(f.store.queryBatch(out.backfill.batchId).logs.map(row=>row.request_id),['late']);
+  const repeated=await scanner.targetedBackfill(user,{start:from,end:first.end},72);
+  assert.equal(repeated.backfill.added,0);assert.equal(repeated.backfill.batchId,null);assert.equal(repeated.items.length,2);
+  assert.equal(f.store.logQueryProgress(user.id).end,first.end);
+});
+test('定向补查严格限制管理员范围并隔离用户，初次补查不冒充完整查询',async t=>{
+  const f=setup(t),scanner=new LogQueries(f.store,f.upstream,f.clock),end=Math.floor(f.clock()/1000),start=end-60;
+  const bounds={consumptionStart:start,consumptionEnd:end-1};
+  for(const range of [{start:start-1,end:end-1},{start,end},{start:end,end:start},{start:start+.5,end:end-1}])await assert.rejects(scanner.targetedBackfill(user,range,72,bounds),/消费时间范围/);
+  assert.equal(f.calls.length,0);
+  f.upstream.logs=async()=>({items:[log('own',{created_at:start}),log('foreign',{id:102,user_id:8,created_at:start}),log('outside',{id:103,created_at:start-1})],total:3});
+  const out=await scanner.targetedBackfill(user,{start,end:end-1},72,bounds);
+  assert.equal(out.end,null);assert.deepEqual(out.items.map(row=>row.request_id),['own']);
+  assert.deepEqual(f.store.queryBatch(out.backfill.batchId).logs.map(row=>row.request_id),['own']);
+  f.upstream.logs=async q=>{f.calls.push(q);return {items:[],total:0};};
+  const complete=await scanner.read(user,{},72,bounds);
+  assert.equal(complete.end,end-1);assert.deepEqual(complete.gaps,[]);
+});
+test('扩大窗口多个缺口中途失败，覆盖范围和批次一起保持原状',async t=>{
+  const f=setup(t),scanner=new LogQueries(f.store,f.upstream,f.clock),first=await scanner.read(user,{},24),before=f.store.logQueryProgress(user.id);
+  f.advance(10000);const original=f.upstream.logs;
+  f.upstream.logs=async q=>{if(q.start>first.end)throw Error('tail unavailable');return original(q);};
+  await assert.rejects(scanner.read(user,{refresh:true},48),/tail unavailable/);
+  assert.deepEqual(f.store.logQueryProgress(user.id),before);
+  f.upstream.logs=original;const restored=await scanner.read(user,{refresh:true},48);
+  assert.deepEqual(restored.gaps,[]);assert.equal(restored.end,Math.floor(f.clock()/1000));
+});
+test('清理查询payload后从已保存批次恢复，窗口再次扩大不丢未提交日志',async t=>{
+  const f=setup(t),now=Math.floor(f.clock()/1000);
+  f.logs.push(log('kept',{created_at:now-2*86400}));
+  const scanner=new LogQueries(f.store,f.upstream,f.clock),first=await scanner.read(user,{},72);
+  await scanner.read(user,{refresh:true},24);assert.equal((await scanner.read(user,{},24)).items.length,0);
+  f.store.clearLogQueryPayload(user.id);
+  const restored=await scanner.read(user,{},72);
+  assert.equal(restored.items[0].request_id,'kept');assert.equal(restored.items[0].query_batch_id,first.items[0].query_batch_id);
+  assert.equal(restored.end,first.end);assert.equal(f.calls.length,1);
+});
+test('清理查询payload保留尚无批次副本的历史日志',async t=>{
+  const f=setup(t),end=Math.floor(f.clock()/1000),start=end-72*3600;
+  f.store.saveLogQueryProgress(user.id,{items:[log('legacy')],end,from:start,coverageStart:start,coverage:[{start,end}],window:{start,end},syncedAt:f.clock()});
+  f.store.clearLogQueryPayload(user.id);
+  const out=await new LogQueries(f.store,f.upstream,f.clock).read(user,{},72);
+  assert.equal(out.items[0]?.request_id,'legacy');assert.equal(f.calls.length,0);
 });
 test('数据库重启保留进度与日志，写入失败原子回滚',async t=>{
   const dir=mkdtempSync(join(tmpdir(),'query-progress-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));let store=new Store(join(dir,'db.sqlite'));const now=Date.now();

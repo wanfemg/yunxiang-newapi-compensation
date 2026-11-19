@@ -38,17 +38,18 @@ test('后台提交在模型完成前返回已持久化进度，重复提交只�
 
 test('HTTP 秒级接续不重扫已覆盖时间，普通读取保留进度',async t=>{
  const f=await setup(t),u=await f.login(user);f.remote.data.logs=[];
+ let queryTime=Date.now()-2000;f.service.logQueries.clock=()=>queryTime;
  const first=(await f.request('/api/logs?view=eligible',u)).json.data;
  assert.equal(first.total,0);
  f.remote.data.logs.push(log('delayed-visible',{created_at:Math.floor(Date.now()/1000)-600}));
  assert.equal((await f.request('/api/logs?view=eligible',u)).json.data.total,0);
- // Set a known earlier successful cutoff instead of waiting for the wall clock.
- const snapshot=f.store.logQueryProgress(user.id);snapshot.end-=2;f.store.saveLogQueryProgress(user.id,snapshot);
- f.remote.data.logs.push(log('new-second',{id:101,created_at:snapshot.end+1}));
+ // Advance the query clock while keeping the persisted cutoff and coverage consistent.
+ queryTime+=2000;
+ f.remote.data.logs.push(log('new-second',{id:101,created_at:first.queryProgress.end+1}));
  const fresh=await f.request('/api/logs?view=eligible&refresh=1',u);
  assert.equal(fresh.status,200);assert.equal(fresh.json.data.total,1);
  assert.equal(fresh.json.data.items[0].log.request_id,'new-second');
- assert.equal(fresh.json.data.queryProgress.from,snapshot.end+1);
+ assert.equal(fresh.json.data.queryProgress.from,first.queryProgress.end+1);
  assert.equal((await f.request('/api/logs?page=2',u)).json.data.queryProgress.end,fresh.json.data.queryProgress.end);
  assert.equal(f.remote.data.credits.length,0);
 });

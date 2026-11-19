@@ -17,7 +17,7 @@ import { normalizeAIBaseURL } from './ai-review.mjs';
 import {notificationMarkdown} from './notification-titles.mjs';
 
 const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
-const assetNames = ['cat-interactive.js','app.js','style.css','glass.css','pixel.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','user-inbox.js','audit-log.js','query-batches.js','ui-version.js','ai-result.js','amount-panel.js'];
+const assetNames = ['cat-interactive.js','app.js','style.css','glass.css','pixel.css','storage-page.css','icons.js','display.js','controls.js','snapshot.js','notification-center.js','user-inbox.js','audit-log.js','query-batches.js','ui-version.js','ai-result.js','amount-panel.js','limit-status.js','storage-page.js'];
 const assetContents = new Map(['index.html',...assetNames].map(name=>[name,readFileSync(join(publicDirectory,name))]));
 const uiVersion = createHash('sha256').update([...assetContents.values()].join('\0')).digest('hex').slice(0,16);
 const staticFiles = new Set(['/', ...assetNames.map(name=>'/'+name)]);
@@ -97,7 +97,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         const content = assetContents.get(file);
         if(file==='index.html'){
           const versioned=content.toString('utf8').replace('<head>', '<head>\n  <meta name="application-origin" content="'+expectedOrigin+'">\n  <meta name="ui-version" content="'+uiVersion+'">')
-            .replace(/(href|src)="\/(style\.css|glass\.css|pixel\.css|icons\.js|app\.js)"/g,'$1="/assets/'+uiVersion+'/$2"');
+            .replace(/(href|src)="\/(style\.css|glass\.css|pixel\.css|storage-page\.css|icons\.js|app\.js)"/g,'$1="/assets/'+uiVersion+'/$2"');
           res.setHeader('Cache-Control','no-store, no-cache, must-revalidate, max-age=0');
           res.setHeader('ETag',`"${uiVersion}"`);res.end(versioned);
         }else{
@@ -226,11 +226,30 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         if (!['all', 'eligible', 'pending'].includes(query.view)) throw new AppError('日志展示范围无效');
         return send(await service.logs(user, query, admin));
       }
+      if(path==='/api/admin/logs/backfill'&&req.method==='POST'){
+        const body=await readBody(req);
+        if(!Number.isSafeInteger(body.userId)||body.userId<=0)throw new AppError('用户 ID 须为正整数');
+        if(!Number.isSafeInteger(body.start)||!Number.isSafeInteger(body.end)||body.start<0||body.start>body.end)throw new AppError('补查起止时间无效，时间须精确到秒');
+        const owner=await upstream.target(body.userId);
+        if(!owner||owner.id!==body.userId||owner.status!==1)throw new AppError('该用户不存在或当前不可用');
+        const rules=store.rules();
+        const result=await service.logQueries.targetedBackfill(owner,{start:body.start,end:body.end},rules.applicationHours,{consumptionStart:rules.consumptionStart,consumptionEnd:rules.consumptionEnd});
+        store.event(null,user.id,'logs_backfilled',{userId:owner.id,from:body.start,end:body.end,added:result.backfill.added});
+        return send({userId:owner.id,backfill:result.backfill,queryProgress:{end:result.end,coverage:result.coverage,gaps:result.gaps,window:result.window}});
+      }
       if (base === '/api/claims' && req.method === 'GET') {
         const data = store.list(admin ? null : user.id, url.searchParams.get('status') || '', pageValue(url.searchParams.get('page')),admin?Object.fromEntries(['owner','model','channel'].map(k=>[k,url.searchParams.get(k)||''])):{});
         return send({ ...data, items: data.items.map(c => service.view(c, admin)) });
       }
       if(path==='/api/batches'&&req.method==='GET')return send(await service.batches.list(user));
+      const resumeBatch=path.match(/^\/api\/batches\/([a-f0-9-]{36})\/resume$/);
+      if(resumeBatch&&req.method==='POST'){
+        await readBody(req);
+        const result=await service.batches.resume(user,resumeBatch[1]);
+        store.notifyClaimsBatch(result.id);
+        await queueEmails(store.batchClaims(result.id),user.id);
+        return send(result);
+      }
       const queryBatch=path.match(/^\/api\/batches\/([a-f0-9-]{36})(\/submit)?$/);
       if(queryBatch&&req.method==='GET'&&!queryBatch[2])return send(await service.batches.view(user,queryBatch[1]));
       if(queryBatch&&req.method==='POST'&&queryBatch[2]){
@@ -268,6 +287,14 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
         return send(service.view(result,true));
       }
       const detail = base.match(/^\/api\/claims\/([a-f0-9-]{36})$/);
+      const resumeClaim=base.match(/^\/api\/claims\/([a-f0-9-]{36})\/resume$/);
+      if(resumeClaim&&req.method==='POST'){
+        await readBody(req);
+        const result=await service.resume(user,resumeClaim[1]);
+        if(result.run_id)store.notifyClaimsBatch(result.run_id);
+        await queueEmails([result],user.id);
+        return send(service.view(result,admin));
+      }
       if (detail && req.method === 'GET') {
         const c = service.claimFor(user, detail[1]);
         const events = store.db.prepare('SELECT actor_id,action,detail,created_at FROM events WHERE claim_id=? ORDER BY id').all(c.id).map(e => admin ? e : { action: e.action, created_at: e.created_at });
@@ -356,7 +383,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
     } catch (e) {
       res.statusCode = e instanceof AppError ? e.status : 500;
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      res.end(JSON.stringify({ success: false, message: e instanceof AppError ? e.message : '服务内部错误，操作结果请查看处理记录', ...(e.code === 'ORIGIN_MISMATCH' ? { code: e.code, canonicalOrigin: expectedOrigin } : {}) }));
+      res.end(JSON.stringify({ success: false, message: e instanceof AppError ? e.message : '服务内部错误，操作结果请查看处理记录', ...(e instanceof AppError&&e.code?{code:e.code}:{}), ...(e instanceof AppError&&e.limit?{limit:e.limit}:{}), ...(e.code === 'ORIGIN_MISMATCH' ? { canonicalOrigin: expectedOrigin } : {}) }));
       if (!(e instanceof AppError)) console.error('Request failed:', e.name);
     }
   });

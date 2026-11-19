@@ -77,10 +77,11 @@ export class AIReviewer {
       : 'AI 服务本次未能完成审核';
     return reason + '，已转管理员审核。';
   }
-  async request(path, options = {}, c = this.config()) {
+  async request(path, options = {}, c = this.config(), beforeSend = null) {
     if (!c.baseUrl || !c.apiKey) throw new AppError('AI API 地址或密钥未配置', 400);
     const endpoint = normalizeAIBaseURL(c.baseUrl) + path;
     const timeout = Number.isSafeInteger(c.timeoutMs) && c.timeoutMs >= 3000 && c.timeoutMs <= 120000 ? c.timeoutMs : 15000;
+    beforeSend?.();
     try {
       return await this.fetcher(endpoint, {
         ...options,
@@ -127,13 +128,13 @@ export class AIReviewer {
     if (items.length && !result.size) throw new AppError('AI 模型列表响应格式错误：未找到有效模型 ID', 502);
     return [...result.values()];
   }
-  async chat(messages, extra = {}, config = this.config()) {
+  async chat(messages, extra = {}, config = this.config(), beforeSend = null) {
     if (!config.model) throw new AppError('请先选择或输入模型名称，再保存并测试', 400);
     const response = await this.request('/chat/completions', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({...extra, model: config.model, stream: false, messages})
-    }, config);
+    }, config, beforeSend);
     const body = await this.responseJSON(response, '模型调用', config);
     const content = body?.choices?.[0]?.message?.content;
     const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter(part=>part?.type === 'text' && typeof part.text === 'string').map(part=>part.text).join('') : '';
@@ -160,13 +161,6 @@ export class AIReviewer {
     const fingerprint = logFingerprint(log);
     const existing = this.store.aiReview(log.request_id, fingerprint, promptVersion);
     if (existing) return existing;
-    if (mode !== 'admin') {
-      const today = new Date(this.now()).toISOString().slice(0, 10);
-      const used = new Set([...this.store.aiReviewKeys(today,log.user_id),...this.inflight.values()
-        .filter(item=>item.mode==='automatic'&&item.userId===log.user_id&&item.day===today)
-        .map(item=>item.batchId||item.promise)]);
-      if (!(batchId&&used.has(batchId))&&used.size >= rules.aiDailyLimit) throw new AppError('AI 审核次数已达今日上限，请转管理员审核', 429);
-    }
     if (!this.configured()) return this.store.saveAiReview({
       requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion, reviewBatchId: batchId,
       decision: 'uncertain', confidence: 0, reason: '管理员尚未配置 AI 服务，本次无法自动审核，已转管理员审核。', evidence: [], rawResponse: null, status: 'fallback'
@@ -192,7 +186,8 @@ export class AIReviewer {
       ]
     };
     try {
-      const content = await this.chat(payload.messages, {temperature: payload.temperature, response_format: payload.response_format}, config);
+      const content = await this.chat(payload.messages, {temperature: payload.temperature, response_format: payload.response_format}, config,
+        mode==='admin'?null:()=>this.store.beginAIReview(batchId||JSON.stringify([log.request_id,fingerprint,promptVersion]),log.user_id,rules,this.now()));
       const parsed = parseReviewJSON(content);
       const probability=parsed.empty_probability;
       const hasProbability=typeof probability==='number'&&Number.isFinite(probability)&&probability>=0&&probability<=1;
@@ -212,6 +207,7 @@ export class AIReviewer {
         rawResponse: safe(content, 8000), status: 'completed',analysis:hasProbability?{...analysis,emptyProbability:probability}:analysis
       });
     } catch (error) {
+      if(error.code==='AI_DAILY_COUNT_LIMIT')throw error;
       return this.store.saveAiReview({
         requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion, reviewBatchId: batchId,
         decision: 'uncertain', confidence: 0, reason: this.failureReason(error), evidence: [this.redact(error.message, config)], rawResponse: null, status: 'failed'

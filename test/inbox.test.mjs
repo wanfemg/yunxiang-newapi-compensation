@@ -47,6 +47,7 @@ test('全部已读只处理已查看范围，单条已读幂等且不能操作�
 test('站内通知读取状态重启保留，旧库结果只回填一次，恢复中断执行产生待核对通知',t=>{
   const directory=mkdtempSync(join(tmpdir(),'inbox-')),path=join(directory,'data.sqlite');
   let store=new Store(path);t.after(()=>{store.close();rmSync(directory,{recursive:true,force:true});});
+  store.saveRules(rules(),admin.id,1);
   const c=store.create(log(),user,store.rules(),'核验','self',7);
   store.transition(c.id,['pending'],'rejected',1,'审核未通过');
   store.db.exec("DELETE FROM user_notifications; DELETE FROM metadata WHERE key='user_notifications_migrated'");

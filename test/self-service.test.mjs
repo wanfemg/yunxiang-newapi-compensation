@@ -30,7 +30,9 @@ test('并发同笔自助至多一次增额，并发不同笔不能突破每日�
   const f=fixture({logs:[log('a'),log('b')],rules:{userDailyQuota:150},credit:async()=>new Promise(r=>setTimeout(r,10))});t.after(()=>f.store.close());
   await Promise.all([f.service.selfService(user,'a'),f.service.selfService(user,'a'),f.service.selfService(user,'b')]);
   assert.equal(f.calls(),1);assert.equal(f.store.overview(user.id).today.quota,120);
-  assert.equal(f.store.list(user.id).items.length,2);assert.equal(f.store.overview(user.id).pending,1);
+  const claims=f.store.list(user.id).items;
+  assert.equal(claims.length,2);assert.equal(claims.filter(c=>c.status==='succeeded').length,1);
+  const waiting=claims.find(c=>c.status==='approved');assert.ok(waiting);assert.equal(waiting.limit.code,'USER_DAILY_QUOTA_LIMIT');
 });
 
 test('自助超时冻结，不重发；原站明确拒绝记失败',async t=>{

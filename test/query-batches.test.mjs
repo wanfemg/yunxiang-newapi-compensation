@@ -9,6 +9,7 @@ import {Compensation} from '../src/service.mjs';
 import {UpstreamError} from '../src/newapi.mjs';
 import {renderQueryBatch} from '../public/query-batches.js';
 import {groupAuditEvents,renderAuditLog} from '../public/audit-log.js';
+import {settlementClock} from '../src/rules.mjs';
 
 async function queried(f){return (await f.service.logs(user,{refresh:true})).batches[0];}
 
@@ -97,7 +98,7 @@ test('整批均未通过不发放、不占次数',async t=>{
 test('整批总额上限和每日额度不静默拆分或截断，保留处理原因',async t=>{
   for(const cap of [{perBatchQuota:200},{userDailyQuota:200},{siteDailyQuota:200}]){
     const f=fixture({logs:[log('a'),log('b',{id:101})],rules:cap});
-    try{const b=await queried(f),out=await f.service.batches.submit(user,b.id);assert.equal(out.status,'review');assert.match(out.note,/上限|额度或次数不足/);assert.equal(f.calls(),0);assert.equal(f.store.overview(user.id).today.count,0);}
+    try{const b=await queried(f),out=await f.service.batches.submit(user,b.id);assert.equal(out.status,'waiting_limit');assert.match(out.note,/上限|额度或次数不足/);assert.equal(out.limit.code,cap.perBatchQuota?'PER_BATCH_QUOTA_LIMIT':cap.userDailyQuota?'USER_DAILY_QUOTA_LIMIT':'SITE_DAILY_QUOTA_LIMIT');assert.equal(out.limit.nextResetAt,null,'应补总额超过完整日上限时，次日重置也不足，需管理员调整');assert.equal(f.calls(),0);assert.equal(f.store.overview(user.id).today.count,0);}
     finally{f.store.close();}
   }
 });
@@ -134,10 +135,11 @@ test('AI 全部结束后才合并发放，单条模型审核不重复请求',asy
   let reviews=0;
   f.service.ai={promptVersion:()=> 'batch-test',review:async (source,_,options={})=>{
     assert.equal(f.calls(),0);reviews++;
+    f.store.beginAIReview(options.batchId,user.id,f.store.rules());
     return f.store.saveAiReview({requestId:source.request_id,userId:user.id,reviewBatchId:options.batchId,fingerprint:(await import('../src/ai-review.mjs')).logFingerprint(source),promptVersion:'batch-test',decision:'empty',confidence:0.98,reason:'空回',status:'completed',rawResponse:null});
   }};
   const b=await queried(f);await f.service.batches.submit(user,b.id);assert.equal(reviews,2);assert.equal(f.calls(),1);
-  assert.equal(f.store.aiReviewCount(new Date().toISOString().slice(0,10),user.id),1);
+  assert.equal(f.store.aiReviewCount(settlementClock(Date.now(),f.store.rules()).day,user.id),1);
   await f.service.batches.submit(user,b.id);assert.equal(reviews,2);assert.equal(f.calls(),1);
 });
 test('最终核验日志变化、AI规则改变，整批不补且保留人工处理',async t=>{

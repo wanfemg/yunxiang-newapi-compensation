@@ -1,4 +1,4 @@
-import { AppError, assessLog, expectedQuota, fundingSource, isOpen, positiveInt, selfServiceDecision } from './rules.mjs';
+import { AppError, assessLog, expectedQuota, fundingSource, isOpen, positiveInt, selfServiceDecision, limitDetail } from './rules.mjs';
 import { logFingerprint } from './ai-review.mjs';
 import { UpstreamError } from './newapi.mjs';
 
@@ -21,12 +21,23 @@ export class QueryBatches {
   }
   async view(user,id) {
     const batch=this.require(user,id),claims=this.store.batchClaims(id),rules=batch.status==='open'?await this.service.ruleContext(batch.logs):this.store.rules();
-    const available=batch.status==='open'?batch.logs.filter(log=>log.request_id&&!this.store.byRequest(log.request_id)&&assessLog(log,{id:batch.user_id},rules).eligible):[];
-    const items=claims.length?claims.map(c=>({id:c.id,requestId:c.request_id,model:c.log.model_name,status:c.status,amount:c.amount||expectedQuota(c.log,c.rules),note:c.review_note||''})):available.map(log=>({requestId:log.request_id,model:log.model_name,status:'unsubmitted',amount:expectedQuota(log,rules)}));
-    const total=items.filter(c=>!['rejected','failed'].includes(c.status)).reduce((n,c)=>n+c.amount,0);
+    const candidates=batch.status==='open'?batch.logs.filter(log=>log.request_id&&!this.store.byRequest(log.request_id)).map(log=>({log,assessment:assessLog(log,{id:batch.user_id},rules)})).filter(item=>item.assessment.candidate):[];
+    const available=candidates.filter(item=>item.assessment.eligible);
+    const items=claims.length?claims.map(c=>({id:c.id,requestId:c.request_id,model:c.log.model_name,status:c.status,amount:c.amount||expectedQuota(c.log,c.rules),note:c.review_note||''})):candidates.map(({log,assessment})=>({requestId:log.request_id,model:log.model_name,status:assessment.eligible?'unsubmitted':'unavailable',amount:assessment.expectedQuota,note:assessment.reasons.join('；')}));
+    const total=items.filter(c=>!['rejected','failed','unavailable'].includes(c.status)).reduce((n,c)=>n+c.amount,0);
     const paidAmount=claims.filter(c=>c.status==='succeeded').reduce((n,c)=>n+c.amount,0);
     const pendingAmount=items.filter(c=>['pending','approved','unsubmitted'].includes(c.status)).reduce((n,c)=>n+c.amount,0);
-    return {id:batch.id,userId:batch.user_id,username:batch.username,status:batch.status,note:batch.note,from:batch.query_from,end:batch.query_end,createdAt:batch.created_at,updatedAt:batch.updated_at,amount:batch.amount,paidAmount,pendingAmount,expectedAmount:total,records:items.length,models:[...new Set(items.map(c=>c.model))],pending:claims.filter(c=>c.status==='pending').length,approved:claims.filter(c=>c.status==='approved').length,judged:claims.filter(c=>c.status!=='pending'||c.review_note).length,items};
+    const submissionLimit=batch.status==='open'?this.store.compensationLimit(batch.user_id,id,0,rules,{countsOnly:true}):null;
+    const estimatedLimit=batch.status==='open'?this.store.compensationLimit(batch.user_id,id,total,rules):null;
+    const limit=batch.status==='waiting_limit'?this.paymentLimit(batch,claims,rules):null;
+    return {id:batch.id,userId:batch.user_id,username:batch.username,status:batch.status,note:batch.note,from:batch.query_from,end:batch.query_end,createdAt:batch.created_at,updatedAt:batch.updated_at,amount:batch.amount,paidAmount,pendingAmount,expectedAmount:total,records:items.length,availableRecords:available.length,canSubmit:batch.status==='open'&&available.length>0&&!submissionLimit,submissionLimit,warnings:estimatedLimit?.kind==='quota'?[estimatedLimit]:[],limit,previousLimit:batch.limit,canResume:batch.status==='waiting_limit'&&!limit&&claims.some(c=>c.status==='approved'),resumable:batch.status==='waiting_limit',models:[...new Set(items.map(c=>c.model))],pending:claims.filter(c=>c.status==='pending').length,approved:claims.filter(c=>c.status==='approved').length,judged:claims.filter(c=>c.status!=='pending'||c.review_note).length,items};
+  }
+  paymentLimit(batch,claims,rules){
+    const approved=claims.filter(c=>c.status==='approved'),paid=claims.filter(c=>c.status==='succeeded').reduce((sum,c)=>sum+c.amount,0);
+    const amount=approved.reduce((sum,c)=>sum+Math.min(c.confirmed_unreturned||expectedQuota(c.log,c.rules),expectedQuota(c.log,c.rules),expectedQuota(c.log,rules)),0);
+    const caps=[rules.perBatchQuota,...claims.map(c=>c.rules.perBatchQuota)].filter(value=>value>0);
+    if(caps.length&&paid+amount>Math.min(...caps))return limitDetail('batch','user',paid,Math.min(...caps),paid+amount,rules,Date.now(),true);
+    return amount?this.store.compensationLimit(batch.user_id,batch.id,amount,rules):null;
   }
   async list(user) {
     const rows=this.store.db.prepare("SELECT id FROM compensation_batches WHERE user_id=? AND status NOT IN ('succeeded','rejected') ORDER BY created_at DESC,id").all(user.id);
@@ -71,7 +82,7 @@ export class QueryBatches {
         try{
           const original=await this.service.upstream.log(claim.request_id);
           if(!sameLog(original,claim.log))throw new AppError('原消费发生变化，转人工核实');
-          const current=await this.service.ruleContext([original]),assessment=assessLog(original,user,current);
+          const current=await this.service.ruleContext([original]),assessment=assessLog(original,user,current,Date.now(),{acceptedAt:claim.created_at,applicationHours:claim.rules.applicationHours});
           if(!assessment.eligible)throw new AppError(assessment.reasons.join('；'));
           await this.service.selfService(user,claim.request_id,reason,id,true);
         }catch(error){
@@ -88,7 +99,7 @@ export class QueryBatches {
     });
     const task={accepted,completion};
     this.submissions.set(id,task);
-    const cleanup=()=>{if(this.submissions.get(id)===task)this.submissions.delete(id);};
+    const cleanup=()=>{this.store.releaseCompensationSlot(id);if(this.submissions.get(id)===task)this.submissions.delete(id);};
     completion.then(cleanup,cleanup);
     return task;
   }
@@ -96,7 +107,7 @@ export class QueryBatches {
     this.service.requireAdmin(user);positiveInt(amount,'核实尚未返还额度');
     if(typeof note!=='string'||!note.trim()||note.length>2000)throw new AppError('返还核验依据不能为空且不得超过 2000 字');
     const batch=this.require(user,claim.batch_id);
-    if(batch.status!=='review'||claim.status!=='approved')throw new AppError('仅整批待处理且已通过审核的记录允许核验',409);
+    if(!['review','waiting_limit'].includes(batch.status)||claim.status!=='approved')throw new AppError('仅整批待处理且已通过审核的记录允许核验',409);
     if(amount>claim.log.quota)throw new AppError('已核实未返还额度不能超过原消费');
     this.store.db.prepare('UPDATE claims SET confirmed_unreturned=?,verification_note=?,batch_auto=0 WHERE id=?').run(amount,note.trim(),claim.id);
   }
@@ -104,9 +115,16 @@ export class QueryBatches {
     this.service.requireAdmin(user);this.require(user,id);
     return this.run(id,()=>this.finishJudging(user,id));
   }
+  async resume(user,id){
+    const batch=this.require(user,id);
+    if(user.role<10&&batch.user_id!==user.id)throw new AppError('只能继续本人的补偿批次',403);
+    if(batch.status==='succeeded')return this.view(user,id);
+    if(batch.status!=='waiting_limit')throw new AppError('当前批次没有等待恢复的额度或次数',409);
+    return this.run(id,()=>this.finishJudging(user,id));
+  }
   async finishJudging(user,id) {
     const batch=this.require(user,id),claims=this.store.batchClaims(id);
-    if(!['judging','review'].includes(batch.status))return this.view(user,id);
+    if(!['judging','review','waiting_limit'].includes(batch.status))return this.view(user,id);
     const partial=claims.some(c=>c.rules.aiEnabled);
     if(claims.some(c=>c.status==='pending')&&!partial){
       this.store.updateBatch(id,'review','部分记录待人工审核；全部审核结束后统一补额度');
@@ -131,12 +149,12 @@ export class QueryBatches {
       const rules=await this.service.ruleContext(originals);
       if(!rules.executionEnabled)throw new AppError('补偿执行暂未开放');
       for(let i=0;i<approved.length;i++){
-        const c=approved[i],original=originals[i],assessment=assessLog(original,{id:batch.user_id},rules);
+        const c=approved[i],original=originals[i],accepted={acceptedAt:c.created_at,applicationHours:c.rules.applicationHours},assessment=assessLog(original,{id:batch.user_id},rules,Date.now(),accepted);
         if(!assessment.eligible)throw new AppError(assessment.reasons.join('；'));
         if(c.batch_auto){
           const ai=this.store.aiReview(c.request_id,logFingerprint(original),this.service.ai.promptVersion?.()||'empty-v1');
           const stricter={...rules,selfServiceMaxQuota:Math.min(rules.selfServiceMaxQuota,c.rules.selfServiceMaxQuota),selfServiceMinAgeSeconds:Math.max(rules.selfServiceMinAgeSeconds,c.rules.selfServiceMinAgeSeconds)};
-          const decision=selfServiceDecision(original,{id:batch.user_id},stricter,Date.now(),ai);
+          const decision=selfServiceDecision(original,{id:batch.user_id},stricter,Date.now(),ai,accepted);
           if(!rules.applicationsEnabled||!isOpen(rules,Date.now())||!decision.automatic){
             this.store.transition(c.id,['approved'],'pending',user.id,'自动审核条件已变化，须管理员复核：'+decision.reasons.join('；'));
             throw new AppError('自动审核条件已变化，须管理员复核：'+decision.reasons.join('；'));
@@ -149,7 +167,7 @@ export class QueryBatches {
       this.store.reserveBatch(id,user.id,entries,rules);
     }catch(error){
       // No remote write has happened. Keep all records for explicit administrator handling.
-      if(this.store.queryBatch(id).status!=='executing')this.store.updateBatch(id,'review',error instanceof AppError?error.message:'原站核验失败，整批未执行，请管理员处理');
+      if(this.store.queryBatch(id).status!=='executing')this.store.updateBatch(id,error.limit?'waiting_limit':'review',error instanceof AppError?error.message:'原站核验失败，整批未执行，请管理员处理',null,error.limit||null);
       return this.view(user,id);
     }
     let status='succeeded',note='云中猫API小站明确返回整批补额度成功';

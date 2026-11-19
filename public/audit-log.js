@@ -21,6 +21,7 @@ const definitions={
   storage_cleanup:['开始清理缓存','neutral','database'],
   storage_cleanup_completed:['缓存清理完成','good','database']
 };
+definitions.logs_backfilled=['补查遗漏日志','neutral','scan-search'];
 Object.assign(definitions,{
   batch_executing:['整批补额度中','neutral','loader'],
   batch_succeeded:['整批补偿成功','good','circle-check'],
@@ -55,6 +56,7 @@ export function describeAuditEvent(event,{formatQuota=n=>String(n)}={}){
   if(event.action==='email_notification_enqueue_failed')summary='补偿处理已记录，邮件未能加入发送队列，请检查邮件配置';
   if(event.action==='storage_cleanup')summary='开始清理可过期缓存和通知发送记录';
   if(event.action==='storage_cleanup_completed')summary='缓存维护完成，申请记录与查询进度保留';
+  if(event.action==='logs_backfilled')summary='已补查用户 #'+d.userId+' 的指定时间段 · 新发现 '+(d.added||0)+' 条日志';
   return {title,tone,icon,summary:summary||'操作已记录，展开原始记录查看详情'};
 }
 export function groupAuditEvents(events){

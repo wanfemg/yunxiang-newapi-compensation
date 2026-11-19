@@ -34,7 +34,7 @@ test('AI 达标仍检查已退款、执行开关和每日总限额；不达标�
   ]){
     const source=log('ai-guard',{other:JSON.stringify(scenario.other||{})}),f=fixture({logs:[source],rules:{aiEnabled:true,aiAutoThreshold:95,...scenario.rules}});
     t.after(()=>f.store.close());enablePassingAI(f,scenario.emptyProbability,scenario.decision);
-    if(scenario.rules?.userDailyQuota){await assert.rejects(f.service.selfService(user,source.request_id),/当日额度或次数不足/);assert.equal(f.calls(),0);continue;}
+    if(scenario.rules?.userDailyQuota){const result=await f.service.selfService(user,source.request_id);assert.equal(result.status,'approved');assert.equal(result.limit.code,'USER_DAILY_QUOTA_LIMIT');assert.equal(f.calls(),0);continue;}
     const result=await f.service.selfService(user,source.request_id);
     assert.equal(result.status,'pending');assert.equal(f.calls(),0);
   }

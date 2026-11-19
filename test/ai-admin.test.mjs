@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {AIReviewer} from '../src/ai-review.mjs';
 import {Store} from '../src/store.mjs';
 import {admin,user,fixture} from './helpers.mjs';
+import {settlementClock} from '../src/rules.mjs';
 
 test('AI 设置保存开关和阈值，重启后仍开启；过期版本不覆盖当前规则',t=>{
   const directory=mkdtempSync(join(tmpdir(),'ai-settings-')),path=join(directory,'data.sqlite');
@@ -62,9 +63,9 @@ test('管理员 AI 辅助审核不受每日次数限制',async t=>{
   const second={...f.logs[0],request_id:'admin-unlimited-review'};
   await f.service.ai.review(second,rules,{mode:'admin'});
   assert.equal(calls,2);
-  assert.equal(f.store.aiReviewCount(new Date().toISOString().slice(0,10),f.logs[0].user_id),0,'管理员复核不占用户自动审查次数');
+  assert.equal(f.store.aiReviewCount(settlementClock(Date.now(),rules).day,f.logs[0].user_id),0,'管理员复核不占用户自动审查次数');
   await f.service.ai.review(f.logs[0],rules);assert.equal(calls,3);
-  assert.equal(f.store.aiReviewCount(new Date().toISOString().slice(0,10),f.logs[0].user_id),1);
+  assert.equal(f.store.aiReviewCount(settlementClock(Date.now(),rules).day,f.logs[0].user_id),1);
 });
 
 test('管理员二次 AI 复核综合原判定并给出明确建议，一键通过补额度仅在建议通过时执行',async t=>{

@@ -1,4 +1,4 @@
-import { AppError, assessLog, expectedQuota, isOpen, publicLog, positiveInt, validateRules, selfServiceDecision, fundingSource, compensationLabel, modelExcluded } from './rules.mjs';
+import { AppError, assessLog, expectedQuota, isOpen, publicLog, positiveInt, validateRules, selfServiceDecision, fundingSource, compensationLabel, modelExcluded, throwLimit } from './rules.mjs';
 import { UpstreamError } from './newapi.mjs';
 import { LogQueries } from './log-queries.mjs';
 import { AIReviewer, logFingerprint } from './ai-review.mjs';
@@ -26,6 +26,10 @@ export class Compensation {
     return c;
   }
   view(c, admin = false) {
+    const batch=c.batch_id?this.store.queryBatch(c.batch_id):null;
+    const waitingLimit=c.status==='approved'&&Boolean(batch?batch.status==='waiting_limit':c.limit);
+    const currentLimit=waitingLimit?(batch?this.batches.paymentLimit(batch,this.store.batchClaims(batch.id),this.store.rules()):this.store.compensationLimit(c.user_id,c.id,c.limit.required,this.store.rules())):null;
+    c={...c,limit:currentLimit,waitingLimit,canResume:waitingLimit&&!currentLimit};
     if (admin) {
       const fingerprint=logFingerprint(c.log),version=this.ai.promptVersion?.()||'empty-v1';
       const adminReview=this.ai.promptVersion?this.store.aiReview(c.request_id,fingerprint,this.ai.promptVersion('admin')):null;
@@ -33,7 +37,7 @@ export class Compensation {
       const aiReview=adminReview||current||this.store.latestAIReview(c.request_id,fingerprint);
       return {...c,fundingSource:fundingSource(c.log),compensationLabel:compensationLabel(c.log,c.source),expectedAmount:expectedQuota(c.log,c.rules),aiReview,aiReviewIsCurrent:Boolean(adminReview||current),aiReviewMode:adminReview?'admin':current?'automatic':'historical'};
     }
-    const { rules, log, operator_id, attempt_id, verification_note, confirmed_unreturned, ...safe } = c;
+    const { rules, log, operator_id, attempt_id, verification_note, confirmed_unreturned, limit_json, ...safe } = c;
     return { ...safe, log: publicLog(log), fundingSource:fundingSource(log),compensationLabel:compensationLabel(log,c.source),ruleVersion: rules.version,expectedAmount:expectedQuota(log,rules) };
   }
   async logs(user, query, admin = false) {
@@ -45,7 +49,7 @@ export class Compensation {
     if (admin) {
       data = await this.upstream.logs({ user: null, page: query.page || 1, model: query.model || '', requestId: query.requestId || '', start: query.start || Math.floor(Date.now() / 1000 - r.applicationHours * 3600), end: query.end, channel: query.channel || '' });
     } else {
-      const snapshot = await this.logQueries.read(user, query, r.applicationHours);
+      const snapshot = await this.logQueries.read(user, query, r.applicationHours,{consumptionStart:r.consumptionStart,consumptionEnd:r.consumptionEnd});
       const visible = snapshot.items.filter(log => {
         if (log.request_id && this.store.byRequest(log.request_id)?.status === 'succeeded') return false;
         if (!excludedKeys.has(JSON.stringify([log.channel,log.model_name]))) return true;
@@ -53,8 +57,8 @@ export class Compensation {
         entry.count++; skipped.set(log.model_name, entry);
         return false;
       });
-      const { end, from, added, coverageStart, scanned } = snapshot;
-      data = { items: visible, total: visible.length, page: query.page || 1, syncedAt: snapshot.syncedAt, queryProgress: {end,from,added,coverageStart,scanned} };
+      const { end, from, added, coverageStart, scanned, coverage, gaps, window } = snapshot;
+      data = { items: visible, total: visible.length, page: query.page || 1, syncedAt: snapshot.syncedAt, queryProgress: {end,from,added,coverageStart,scanned,coverage,gaps,window} };
     }
     r=await this.ruleContext(data.items);
     const usage = new Map();
@@ -66,7 +70,8 @@ export class Compensation {
       if (!isOpen(r, Date.now())) reasons.push('不在每日申请开放时段');
       if (!usage.has(log.user_id)) usage.set(log.user_id, this.store.overview(log.user_id));
       const day = usage.get(log.user_id);
-      if (day.today.count >= r.userDailyCount || day.today.quota + assessment.expectedQuota > r.userDailyQuota || day.siteToday.count >= r.siteDailyCount || day.siteToday.quota + assessment.expectedQuota > r.siteDailyQuota) reasons.push('当日额度或次数不足');
+      const limit=this.store.compensationLimit(log.user_id,c?.batch_id||c?.id||'',0,r,{countsOnly:true});
+      if(limit)reasons.push(limit.message);
       if (c) reasons.push('已有申请，查看处理进度');
       const decision=r.aiEnabled
         ?{automatic:false,reasons:['提交申请后由 AI 按当前阈值自动判定并处理']}
@@ -94,9 +99,9 @@ export class Compensation {
     if (!isOpen(rules, Date.now())) throw new AppError('不在每日申请开放时段');
     const a = assessLog(log, owner, rules);
     if (!a.eligible) throw new AppError(a.reasons.join('；'));
-    const usage = this.store.overview(owner.id);
-    if (usage.today.count >= rules.userDailyCount || usage.today.quota + a.expectedQuota > rules.userDailyQuota || usage.siteToday.count >= rules.siteDailyCount || usage.siteToday.quota + a.expectedQuota > rules.siteDailyQuota) throw new AppError('当日额度或次数不足');
-    return this.view(this.store.create(log, owner, rules, reason, manual ? 'manual' : 'self', user.id, !selfService, runId), user.role >= 10);
+    const limit=this.store.compensationLimit(owner.id,'',0,rules,{countsOnly:true});
+    if(limit)throwLimit(limit);
+    return this.view(this.store.create(log, owner, rules, reason, manual ? 'manual' : 'self', user.id, !selfService, runId,selfService), user.role >= 10);
   }
   review(user, id, action, note) {
     this.requireAdmin(user); const claim=this.claimFor(user, id);
@@ -105,7 +110,7 @@ export class Compensation {
     if(action==='approve'&&fundingSource(claim.log)==='subscription')throw new AppError('订阅转余额审批须确认核实金额并执行返还');
     if(claim.batch_id){
       const batch=this.store.queryBatch(claim.batch_id);
-      if(batch.status!=='review')throw new AppError('当前补偿批次已锁定，不能修改审核',409);
+      if(!['review','waiting_limit'].includes(batch.status))throw new AppError('当前补偿批次已锁定，不能修改审核',409);
       this.store.db.prepare('UPDATE claims SET batch_auto=0 WHERE id=?').run(id);
     }
     return this.store.transition(id, ['pending'], action === 'approve' ? 'approved' : 'rejected', user.id, note);
@@ -126,7 +131,7 @@ export class Compensation {
     this.requireAdmin(user);
     const claim=this.claimFor(user,id),rules=this.store.rules();
     if(claim.status!=='pending')throw new AppError('仅待审核申请可采纳 AI 建议并补额度',409);
-    if(claim.batch_id&&this.store.queryBatch(claim.batch_id)?.status!=='review')throw new AppError('整批正在处理中，请等待审查完成',409);
+    if(claim.batch_id&&!['review','waiting_limit'].includes(this.store.queryBatch(claim.batch_id)?.status))throw new AppError('整批正在处理中，请等待审查完成',409);
     if(fundingSource(claim.log)==='subscription')throw new AppError('订阅申请须逐笔核实未退款金额，请使用原审核流程');
     if(!this.ai.promptVersion)throw new AppError('AI 复核版本不可用，请重新执行 AI 辅助审核',409);
     const review=this.store.aiReview(claim.request_id,logFingerprint(claim.log),this.ai.promptVersion('admin'));
@@ -138,7 +143,7 @@ export class Compensation {
   }
   async approveSubscription(user,id,verifiedAmount,note,deferBatch=false){
     this.requireAdmin(user);const claim=this.claimFor(user,id);
-    if(claim.batch_id&&this.store.queryBatch(claim.batch_id)?.status!=='review')throw new AppError('整批正在处理中，请等待审查完成',409);
+    if(claim.batch_id&&!['review','waiting_limit'].includes(this.store.queryBatch(claim.batch_id)?.status))throw new AppError('整批正在处理中，请等待审查完成',409);
     if(fundingSource(claim.log)!=='subscription')throw new AppError('不是订阅消费');
     positiveInt(verifiedAmount,'核实尚未返还额度');note=text(note,'订阅转余额核验依据');
     if(verifiedAmount>claim.log.quota)throw new AppError('已核实未返还额度不能超过原消费');
@@ -167,6 +172,7 @@ export class Compensation {
       throw error;
     }
     const claim=this.store.get(created.id);
+    try{
     let aiReview = null;
     const activeRules = this.store.rules();
     if (activeRules.aiEnabled) {
@@ -190,7 +196,8 @@ export class Compensation {
         });
       }
     }
-    const decision=selfServiceDecision(claim.log,user,await this.ruleContext([claim.log]),Date.now(),aiReview);
+    const accepted={acceptedAt:claim.created_at,applicationHours:claim.rules.applicationHours};
+    const decision=selfServiceDecision(claim.log,user,await this.ruleContext([claim.log]),Date.now(),aiReview,accepted);
     if (aiReview) {
       const probability=aiReview.analysis?.emptyProbability;
       this.store.event(claim.id,user.id,'ai_reviewed',{decision:aiReview.decision,confidence:aiReview.confidence,...(Number.isFinite(probability)?{emptyProbability:probability}:{}),reason:aiReview.reason,status:aiReview.status});
@@ -204,7 +211,7 @@ export class Compensation {
       return this.view(this.store.transition(claim.id,['pending'],'pending',user.id,(aiReview?'等待管理员审核：':'等待管理员审批：')+decision.reasons.join('；')));
     }
     try{
-      if(prepared)this.store.db.prepare('UPDATE claims SET batch_auto=1 WHERE id=?').run(claim.id);
+      this.store.db.prepare('UPDATE claims SET batch_auto=1 WHERE id=?').run(claim.id);
       this.store.transition(claim.id,['pending'],'approved',user.id,aiReview?'AI 判定空回且达到阈值，自动执行补偿':'系统自助核验通过，自动执行补偿');
       if(prepared)return this.view(this.store.get(claim.id));
       const result=await this.#execute(user,claim.id,claim.log.quota,'系统自助：空回证据、AI 判定、余额扣费、规则与限额核验',true);
@@ -216,6 +223,7 @@ export class Compensation {
       if(['pending','approved'].includes(current.status))return this.view(this.store.transition(claim.id,[current.status],'pending',user.id,'自助核验异常，转审批：'+(error instanceof AppError?error.message:'上游暂不可核验')));
       return this.view(current);
     }
+    }finally{if(!prepared)this.store.releaseCompensationSlot(claim.id);}
   }
   async execute(user, id, verifiedAmount, note, deferBatch = false) {
     this.requireAdmin(user);
@@ -238,30 +246,45 @@ export class Compensation {
       for (const key of ['request_id', 'type', 'user_id', 'quota', 'created_at', 'model_name', 'channel', 'prompt_tokens', 'completion_tokens', 'group', 'other']) {
         if (JSON.stringify(original[key]) !== JSON.stringify(c.log[key])) throw new AppError('原消费发生变化，须重新核实，未执行返还', 409);
       }
-      if(automatic){const target=await this.upstream.target(c.user_id);if(target?.id!==c.user_id||target.status!==1)throw new AppError('原消费账号状态异常');}
+      const target=await this.upstream.target(c.user_id);
+      if(target?.id!==c.user_id||target.status!==1)throw new AppError('原消费账号状态异常');
       // Await all network reads before the reservation; read latest rules immediately before it.
       const rules = await this.ruleContext([original]);
+      const accepted={acceptedAt:c.created_at,applicationHours:c.rules.applicationHours};
       if (!rules.executionEnabled) throw new AppError('补偿执行暂未开放');
       if(automatic){
         if(!rules.applicationsEnabled||!isOpen(rules,Date.now()))throw new AppError('自助补偿开放时间或开关已变更');
         const aiReview = this.store.aiReview(c.request_id, logFingerprint(original), this.ai.promptVersion?.() || 'empty-v1');
-        const decision=selfServiceDecision(original,{id:c.user_id},rules,Date.now(),aiReview);
+        const decision=selfServiceDecision(original,{id:c.user_id},rules,Date.now(),aiReview,accepted);
         if(!decision.automatic)throw new AppError(decision.reasons.join('；'));
-        const originalDecision=selfServiceDecision(original,{id:c.user_id},{...rules,selfServiceMaxQuota:Math.min(rules.selfServiceMaxQuota,c.rules.selfServiceMaxQuota),selfServiceMinAgeSeconds:Math.max(rules.selfServiceMinAgeSeconds,c.rules.selfServiceMinAgeSeconds)},Date.now(),aiReview);
+        const originalDecision=selfServiceDecision(original,{id:c.user_id},{...rules,selfServiceMaxQuota:Math.min(rules.selfServiceMaxQuota,c.rules.selfServiceMaxQuota),selfServiceMinAgeSeconds:Math.max(rules.selfServiceMinAgeSeconds,c.rules.selfServiceMinAgeSeconds)},Date.now(),aiReview,accepted);
         if(!originalDecision.automatic)throw new AppError(originalDecision.reasons.join('；'));
       }
-      const a = assessLog(original, { id: c.user_id }, rules);
+      const a = assessLog(original, { id: c.user_id }, rules,Date.now(),accepted);
       if (!a.eligible) throw new AppError(a.reasons.join('；'));
       if (verifiedAmount > original.quota) throw new AppError('已核实未返还额度不能超过原消费');
       const amount = Math.min(verifiedAmount, expectedQuota(original, c.rules), expectedQuota(original, rules));
       positiveInt(amount, '实际补偿额度');
-      this.store.reserve(id, user.id, amount, verifiedAmount, note, rules);
+      try{this.store.reserve(id, user.id, amount, verifiedAmount, note, rules);}
+      catch(error){
+        if(!error.limit||error.code==='PER_BATCH_QUOTA_LIMIT')throw error;
+        if(JSON.stringify(c.limit)!==JSON.stringify(error.limit)||c.review_note!==error.message||c.confirmed_unreturned!==verifiedAmount||c.verification_note!==note)
+          this.store.db.prepare('UPDATE claims SET limit_json=?,review_note=?,confirmed_unreturned=?,verification_note=?,updated_at=? WHERE id=?').run(JSON.stringify(error.limit),error.message,verifiedAmount,note,Date.now(),id);
+        return this.store.get(id);
+      }
       try { await this.upstream.credit(c.user_id, amount); }
       catch (e) {
         return this.store.transition(id, ['executing'], e instanceof UpstreamError && e.definitive ? 'failed' : 'unknown', user.id, e instanceof UpstreamError && e.definitive ? '原站明确拒绝，未返还；需核查后重新审核' : '请求结果不明，须核对原站到账凭据；禁止直接重试');
       }
       return this.store.transition(id, ['executing'], 'succeeded', user.id, '云中猫API小站 明确返回成功');
     } finally { this.locks.delete(id); }
+  }
+  async resume(user,id){
+    const claim=this.claimFor(user,id);
+    if(claim.batch_id){await this.batches.resume(user,claim.batch_id);return this.store.get(id);}
+    if(claim.status==='succeeded')return claim;
+    if(claim.status!=='approved'||!claim.limit)throw new AppError('当前申请没有等待恢复的额度或次数',409);
+    return this.#execute(user,id,claim.confirmed_unreturned||claim.log.quota,claim.verification_note||'额度恢复后继续已通过的补偿',Boolean(claim.batch_auto));
   }
   reconcile(user, id, outcome, note) {
     this.requireAdmin(user); note = text(note, '对账凭据');

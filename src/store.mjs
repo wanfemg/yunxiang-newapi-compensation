@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID, createHash } from 'node:crypto';
-import { defaults, AppError, settlementClock, expectedQuota, fundingSource, compensationLabel, validateRules } from './rules.mjs';
+import { defaults, AppError, settlementClock, expectedQuota, fundingSource, compensationLabel, validateRules, limitDetail, nextResetAt, throwLimit } from './rules.mjs';
 import {formatQuota} from '../public/display.js';
 import {notificationTitle,batchNotificationTitle} from './notification-titles.mjs';
 
@@ -38,6 +38,11 @@ export class Store {
         UNIQUE(request_id, log_fingerprint, prompt_version)
       );
       CREATE INDEX IF NOT EXISTS ai_reviews_user_day ON ai_reviews(user_id, created_at);
+      CREATE TABLE IF NOT EXISTS compensation_counts (compensation_key TEXT PRIMARY KEY, user_id INTEGER NOT NULL, reserved_at INTEGER NOT NULL, execution_day TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS compensation_counts_day ON compensation_counts(execution_day,user_id);
+      CREATE TABLE IF NOT EXISTS compensation_slots (compensation_key TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at INTEGER NOT NULL, execution_day TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS ai_review_runs (review_key TEXT PRIMARY KEY, user_id INTEGER NOT NULL, started_at INTEGER NOT NULL, execution_day TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS ai_review_runs_day ON ai_review_runs(execution_day,user_id);
     `);
     if(!this.db.prepare('PRAGMA table_info(claims)').all().some(c=>c.name==='run_id'))this.db.exec('ALTER TABLE claims ADD COLUMN run_id TEXT');
     if(!this.db.prepare('PRAGMA table_info(claims)').all().some(c=>c.name==='batch_id'))this.db.exec('ALTER TABLE claims ADD COLUMN batch_id TEXT REFERENCES compensation_batches(id)');
@@ -48,6 +53,8 @@ export class Store {
     }
     if(!this.db.prepare('PRAGMA table_info(ai_reviews)').all().some(c=>c.name==='analysis'))this.db.exec('ALTER TABLE ai_reviews ADD COLUMN analysis TEXT');
     if(!this.db.prepare('PRAGMA table_info(ai_reviews)').all().some(c=>c.name==='review_batch_id'))this.db.exec('ALTER TABLE ai_reviews ADD COLUMN review_batch_id TEXT');
+    if(!this.db.prepare('PRAGMA table_info(compensation_batches)').all().some(c=>c.name==='limit_json'))this.db.exec('ALTER TABLE compensation_batches ADD COLUMN limit_json TEXT');
+    if(!this.db.prepare('PRAGMA table_info(claims)').all().some(c=>c.name==='limit_json'))this.db.exec('ALTER TABLE claims ADD COLUMN limit_json TEXT');
     this.db.exec('CREATE INDEX IF NOT EXISTS claims_run ON claims(user_id,run_id)');
     if (!this.db.prepare('PRAGMA table_info(notifications)').all().some(c => c.name === 'dedupe_key')) {
       this.db.exec('ALTER TABLE notifications ADD COLUMN dedupe_key TEXT');
@@ -72,6 +79,20 @@ export class Store {
     this.db.prepare("UPDATE claims SET status='unknown', review_note='服务重启后无法确认到账结果，等待管理员核对，禁止重复返还', updated_at=? WHERE status='executing'").run(Date.now());
     this.db.prepare("UPDATE compensation_batches SET status='unknown',note='服务重启，整批到账待核对，禁止重复补偿',updated_at=? WHERE status='executing'").run(Date.now());
     this.db.prepare("UPDATE compensation_batches SET status='review',note='审查中断，剩余记录转人工审核',updated_at=? WHERE status='judging'").run(Date.now());
+    this.db.exec('DELETE FROM compensation_slots');
+    this.transaction(() => {
+      const rules = this.rules();
+      if (!this.db.prepare("SELECT 1 FROM metadata WHERE key='compensation_counts_migrated'").get()) {
+        const insert = this.db.prepare('INSERT OR IGNORE INTO compensation_counts VALUES(?,?,?,?)');
+        for (const row of this.db.prepare("SELECT COALESCE(batch_id,id) AS key,user_id,MIN(COALESCE(reserved_at,updated_at)) AS started FROM claims WHERE status IN ('executing','unknown','succeeded') GROUP BY COALESCE(batch_id,id)").all()) insert.run(row.key,row.user_id,row.started,settlementClock(row.started,rules).day);
+        this.db.prepare("INSERT INTO metadata VALUES('compensation_counts_migrated','1')").run();
+      }
+      if (!this.db.prepare("SELECT 1 FROM metadata WHERE key='ai_review_runs_migrated'").get()) {
+        const insert = this.db.prepare('INSERT OR IGNORE INTO ai_review_runs VALUES(?,?,?,?)');
+        for (const row of this.db.prepare("SELECT COALESCE(review_batch_id,id) AS key,user_id,MIN(created_at) AS started FROM ai_reviews WHERE status IN ('completed','failed') AND prompt_version NOT LIKE '%-admin-assist-%' GROUP BY COALESCE(review_batch_id,id)").all()) insert.run(row.key,row.user_id,row.started,settlementClock(row.started,rules).day);
+        this.db.prepare("INSERT INTO metadata VALUES('ai_review_runs_migrated','1')").run();
+      }
+    });
     // Existing paid claims keep their original ledger identity. Only discovered logs acquire a query batch.
     this.transaction(() => {
       for (const row of this.db.prepare('SELECT user_id,payload FROM log_query_progress').all()) {
@@ -94,11 +115,39 @@ export class Store {
   storageInfo() {
     const file = this.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file;
     const count = table => this.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+    const category = (key,label,table,columns,cleanup) => {
+      const expression=columns.map(column=>`COALESCE(length(CAST(${column} AS BLOB)),0)`).join('+');
+      const row=this.db.prepare(`SELECT COUNT(*) AS count,COALESCE(SUM(${expression}),0) AS payloadBytes FROM ${table}`).get();
+      return {key,label,...row,cleanup};
+    };
+    const categories=[
+      category('cache','临时查询缓存','log_query_cache',['payload'],'delete'),
+      category('snapshots','查询进度日志副本','log_query_progress',['payload'],'settledCopies'),
+      category('batches','查询批次与原始日志','compensation_batches',['logs','note'],'retained'),
+      category('claims','补偿申请与发放账本','claims',['log','rules','reason','review_note','verification_note'],'retained'),
+      category('aiReviews','AI 审核证据','ai_reviews',['reason','evidence','raw_response','analysis'],'retained'),
+      category('audit','管理员操作记录','events',['detail','action'],'retained'),
+      category('dingNotifications','钉钉通知','notifications',['body','result','dedupe_key'],'contentOnly'),
+      category('emailNotifications','邮件通知','email_notifications',['body','result','recipient','dedupe_key'],'contentOnly'),
+      category('inbox','用户站内通知','user_notifications',['title','body','dedupe_key'],'retained')
+    ];
+    let systemBytes=this.db.prepare('SELECT COALESCE(SUM(length(CAST(value AS BLOB))),0) AS n FROM settings').get().n+this.db.prepare('SELECT COALESCE(SUM(length(CAST(value AS BLOB))),0) AS n FROM metadata').get().n;
+    let systemCount=count('settings')+count('metadata');
+    if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='email_notification_claims'").get()){
+      systemBytes+=this.db.prepare('SELECT COALESCE(SUM(length(CAST(event AS BLOB))+length(CAST(claim_id AS BLOB))),0) AS n FROM email_notification_claims').get().n;
+      systemCount+=count('email_notification_claims');
+    }
+    for(const [table,key] of [['compensation_counts','compensation_key'],['compensation_slots','compensation_key'],['ai_review_runs','review_key']]){
+      systemBytes+=this.db.prepare(`SELECT COALESCE(SUM(length(CAST(${key} AS BLOB))+length(CAST(execution_day AS BLOB))),0) AS n FROM ${table}`).get().n;
+      systemCount+=count(table);
+    }
+    categories.push({key:'system',label:'系统设置与持久标记',count:systemCount,payloadBytes:systemBytes,cleanup:'retained'});
+    const logicalBytes=this.db.prepare('PRAGMA page_count').get().page_count*this.db.prepare('PRAGMA page_size').get().page_size;
     return { engine: 'SQLite', persistent: Boolean(file), journalMode: this.db.prepare('PRAGMA journal_mode').get().journal_mode,
       schemaVersion: this.db.prepare('PRAGMA user_version').get().user_version,
       claims: count('claims'), logs: count('log_query_cache'), events: count('events'),
       notifications: count('notifications'), freeBytes: this.db.prepare('PRAGMA freelist_count').get().freelist_count * this.db.prepare('PRAGMA page_size').get().page_size,
-      bytes: this.db.prepare('PRAGMA page_count').get().page_count * this.db.prepare('PRAGMA page_size').get().page_size };
+      bytes: logicalBytes, logicalBytes, categories, payloadBytes:categories.reduce((sum,row)=>sum+row.payloadBytes,0) };
   }
   bindInstance(url) {
     const normalized = new URL(url).origin;
@@ -153,11 +202,14 @@ export class Store {
       const current = this.rules();
       if (current.version !== expectedVersion) throw new AppError('规则已更新，请刷新后重试', 409);
       if (rules.timezone !== current.timezone && this.db.prepare("SELECT COUNT(*) AS n FROM claims WHERE status IN ('executing','unknown','succeeded')").get().n > 0) throw new AppError('已有执行记录，不允许切换每日结算时区以免限额重置', 409);
-      if ((rules.dailyResetTime || '00:00') !== current.dailyResetTime) {
+      if (rules.timezone !== current.timezone || (rules.dailyResetTime || '00:00') !== current.dailyResetTime) {
         const update = this.db.prepare('UPDATE claims SET execution_day=? WHERE id=?');
         for (const claim of this.db.prepare('SELECT id,reserved_at FROM claims WHERE reserved_at IS NOT NULL').all()) {
           update.run(settlementClock(claim.reserved_at, rules).day, claim.id);
         }
+        for (const row of this.db.prepare('SELECT compensation_key,reserved_at FROM compensation_counts').all()) this.db.prepare('UPDATE compensation_counts SET execution_day=? WHERE compensation_key=?').run(settlementClock(row.reserved_at,rules).day,row.compensation_key);
+        for (const row of this.db.prepare('SELECT compensation_key,created_at FROM compensation_slots').all()) this.db.prepare('UPDATE compensation_slots SET execution_day=? WHERE compensation_key=?').run(settlementClock(row.created_at,rules).day,row.compensation_key);
+        for (const row of this.db.prepare('SELECT review_key,started_at FROM ai_review_runs').all()) this.db.prepare('UPDATE ai_review_runs SET execution_day=? WHERE review_key=?').run(settlementClock(row.started_at,rules).day,row.review_key);
       }
       const next = { ...rules, version: current.version + 1 };
       this.db.prepare('UPDATE settings SET value=? WHERE id=1').run(JSON.stringify(next));
@@ -226,18 +278,20 @@ export class Store {
     let display;try{display=JSON.parse(this.db.prepare("SELECT value FROM metadata WHERE key='display'").get()?.value);}catch{}
     const succeeded=claims.filter(c=>c.status==='succeeded'),total=succeeded.reduce((sum,c)=>sum+c.amount,0);
     const hasAI=claims.some(claim=>this.db.prepare("SELECT 1 FROM events WHERE claim_id=? AND action IN ('ai_reviewed','admin_ai_reviewed') LIMIT 1").get(claim.id));
-    const title=batchNotificationTitle(claims,hasAI);
+    const batch=this.queryBatch(runId),waiting=batch?.status==='waiting_limit';
+    const title=waiting?'审核结果 · 补偿暂缓':batchNotificationTitle(claims,hasAI);
     const rows=claims.map(c=>`- **${safe(c.log.model_name)}** · ${safe(c.request_id)} · ${labels[c.status]||safe(c.status)} · ${display?formatQuota(c.status==='succeeded'?c.amount:expectedQuota(c.log,c.rules),display):c.status==='succeeded'?c.amount:expectedQuota(c.log,c.rules)}${c.review_note?' · '+safe(c.review_note):''}`);
     const text='### '+title+'\n'+[
       `- **用户**：${safe(claims[0].username)}（ID ${claims[0].user_id}）`,
       `- **申请笔数 / 模型数**：${claims.length} / ${new Set(claims.map(c=>c.log.model_name)).size}`,
       `- **已确认补回**：${succeeded.length} 笔 · ${display?formatQuota(total,display):total}`,
+      ...(waiting?[`- **整批处理说明**：${safe(batch.note)}`]:[]),
       '- **逐笔结果**：',...rows,
       `- **时间**：${new Date(Math.max(...claims.map(c=>c.updated_at))).toLocaleString('zh-CN',{timeZone:this.rules().timezone,hour12:false})}`
     ].join('\n');
-    this.notify('batch_result',JSON.stringify({title,text}),JSON.stringify([runId,owner,claims.map(c=>[c.id,c.status,c.amount,c.review_note,c.updated_at]),hasAI]));
+    this.notify('batch_result',JSON.stringify({title,text}),JSON.stringify([runId,owner,claims.map(c=>[c.id,c.status,c.amount,c.review_note]),hasAI,waiting?batch.limit:null]));
   }
-  decode(row) { return row ? { ...row, log: JSON.parse(row.log), rules: JSON.parse(row.rules) } : null; }
+  decode(row) { return row ? { ...row, log: JSON.parse(row.log), rules: JSON.parse(row.rules), limit: row.limit_json ? JSON.parse(row.limit_json) : null } : null; }
   get(id) { return this.decode(this.db.prepare('SELECT * FROM claims WHERE id=?').get(id)); }
   byRequest(id) { return this.decode(this.db.prepare('SELECT * FROM claims WHERE request_id=?').get(id)); }
   auditEvents() {
@@ -261,7 +315,32 @@ export class Store {
   }
   logQueryProgress(userId) {
     const row = this.db.prepare('SELECT payload FROM log_query_progress WHERE user_id=?').get(userId);
-    return row ? JSON.parse(row.payload) : null;
+    if(!row)return null;
+    const snapshot=JSON.parse(row.payload);
+    if(snapshot.itemsOmitted){
+      const start=snapshot.window?.start??snapshot.coverageStart??snapshot.from,end=snapshot.window?.end??snapshot.end;
+      snapshot.items=[...new Map([...(snapshot.items||[]),...this.logQueryRows(userId,start,end)].map(log=>[log.query_identity||JSON.stringify(log),log])).values()];
+    }
+    return snapshot;
+  }
+  logQueryRows(userId,start,end) {
+    return this.db.prepare(`SELECT l.value AS payload FROM compensation_batches b,json_each(b.logs) l
+      WHERE b.user_id=? AND b.query_end>=? AND b.query_from<=?
+      AND json_extract(l.value,'$.user_id')=? AND json_extract(l.value,'$.created_at') BETWEEN ? AND ?
+      ORDER BY b.created_at,b.id,l.key`).all(userId,start,end,userId,start,end).map(row=>JSON.parse(row.payload));
+  }
+  clearLogQueryPayload(userId=null) {
+    return this.transaction(()=>{
+      const rows=userId===null?this.db.prepare('SELECT user_id,payload FROM log_query_progress').all():this.db.prepare('SELECT user_id,payload FROM log_query_progress WHERE user_id=?').all(userId);
+      const update=this.db.prepare('UPDATE log_query_progress SET payload=? WHERE user_id=?');
+      for(const row of rows){
+        const snapshot=JSON.parse(row.payload),start=snapshot.window?.start??snapshot.coverageStart??snapshot.from,end=snapshot.window?.end??snapshot.end;
+        const backedUp=new Set(this.logQueryRows(row.user_id,start,end).map(log=>JSON.stringify(log)));
+        snapshot.items=(snapshot.items||[]).filter(log=>!backedUp.has(JSON.stringify(log)));
+        snapshot.itemsOmitted=true;update.run(JSON.stringify(snapshot),row.user_id);
+      }
+      return rows.length;
+    });
   }
   saveLogQueryProgress(userId, snapshot, batch = null) {
     // One row commits discovered logs and the successful cutoff together, outside disposable caches.
@@ -277,14 +356,14 @@ export class Store {
   }
   queryBatch(id) {
     const row=this.db.prepare('SELECT * FROM compensation_batches WHERE id=?').get(id);
-    return row?{...row,logs:JSON.parse(row.logs)}:null;
+    return row?{...row,logs:JSON.parse(row.logs),limit:row.limit_json?JSON.parse(row.limit_json):null}:null;
   }
   batchClaims(id) { return this.db.prepare('SELECT * FROM claims WHERE batch_id=? ORDER BY created_at,id').all(id).map(row=>this.decode(row)); }
   batchForRequest(userId,requestId) {
     return this.db.prepare("SELECT b.id FROM compensation_batches b,json_each(b.logs) l WHERE b.user_id=? AND json_extract(l.value,'$.request_id')=? ORDER BY b.created_at LIMIT 1").get(userId,requestId)?.id;
   }
-  updateBatch(id,status,note='',amount=null) {
-    this.db.prepare('UPDATE compensation_batches SET status=?,note=?,amount=COALESCE(?,amount),updated_at=? WHERE id=?').run(status,note,amount,Date.now(),id);
+  updateBatch(id,status,note='',amount=null,limit=null) {
+    this.db.prepare('UPDATE compensation_batches SET status=?,note=?,amount=COALESCE(?,amount),updated_at=?,limit_json=? WHERE id=?').run(status,note,amount,Date.now(),limit?JSON.stringify(limit):null,id);
     return this.queryBatch(id);
   }
   enrollBatch(id,logs,user,rules,reason,actor) {
@@ -293,6 +372,7 @@ export class Store {
       if(!batch||batch.status!=='open'||batch.user_id!==user.id)throw new AppError('本次查询已提交，请查看处理进度',409);
       const pending=this.db.prepare("SELECT COUNT(DISTINCT COALESCE(batch_id,id)) AS n FROM claims WHERE user_id=? AND status IN ('pending','approved','executing','unknown')").get(user.id).n;
       if(pending>=rules.maxPending)throw new AppError('待处理补偿次数已达上限',409);
+      this.holdCompensationSlot(id,user.id,rules);
       for(const log of logs){
         if(this.byRequest(log.request_id))continue;
         const claimId=randomUUID(),now=Date.now();
@@ -309,7 +389,7 @@ export class Store {
       const batch=this.queryBatch(id),claims=this.batchClaims(id);
       const partial=claims.some(c=>c.rules.aiEnabled);
       const allowed=partial?['pending','approved','rejected','succeeded']:['approved','rejected'];
-      if(!batch||!['review','judging'].includes(batch.status)||claims.some(c=>!allowed.includes(c.status)))throw new AppError('批次尚有未处理的执行结果，不能补偿',409);
+      if(!batch||!['review','judging','waiting_limit'].includes(batch.status)||claims.some(c=>!allowed.includes(c.status)))throw new AppError('批次尚有未处理的执行结果，不能补偿',409);
       const approved=claims.filter(c=>c.status==='approved');
       if(!approved.length||entries.length!==approved.length||new Set(entries.map(e=>e.id)).size!==approved.length||approved.some(c=>!entries.some(e=>e.id===c.id)))throw new AppError('补偿批次内容不完整',409);
       const amount=entries.reduce((sum,e)=>sum+e.amount,0);
@@ -317,16 +397,15 @@ export class Store {
       const paid=claims.filter(c=>c.status==='succeeded').reduce((n,c)=>n+c.amount,0),total=paid+amount;
       if(!Number.isSafeInteger(total))throw new AppError('批次累计补偿金额无效');
       const caps=[rules.perBatchQuota,...claims.map(c=>c.rules.perBatchQuota)].filter(v=>v>0);
-      if(caps.length&&total>Math.min(...caps))throw new AppError('整批累计应补额度超过单次补偿上限，请管理员核实，未执行本次补偿',409);
+      if(caps.length&&total>Math.min(...caps))throwLimit(limitDetail('batch','user',paid,Math.min(...caps),total,rules,Date.now(),true));
       const now=Date.now(),day=settlementClock(now,rules).day,attempt=randomUUID();
-      for(const [owner,quota,count]of [[batch.user_id,rules.userDailyQuota,rules.userDailyCount],[null,rules.siteDailyQuota,rules.siteDailyCount]]){
-        const used=this.usage(day,owner);
-        const alreadyCounted=claims.some(c=>c.execution_day===day&&['executing','unknown','succeeded'].includes(c.status));
-        if(used.quota+amount>quota||used.count+(alreadyCounted?0:1)>count)throw new AppError(`${owner===null?'全站':'用户'}当日额度或次数不足，整批已保留`,409);
-      }
+      const limit=this.compensationLimit(batch.user_id,id,amount,rules,{now});
+      if(limit)throwLimit(limit);
+      this.reserveCompensationCount(id,batch.user_id,rules,now);
+      this.releaseCompensationSlot(id);
       for(const entry of entries){
         if(!Number.isSafeInteger(entry.amount)||entry.amount<=0)throw new AppError('单条补偿额度无效');
-        this.db.prepare("UPDATE claims SET status='executing',amount=?,confirmed_unreturned=?,verification_note=?,operator_id=?,execution_day=?,attempt_id=?,updated_at=?,reserved_at=? WHERE id=?")
+        this.db.prepare("UPDATE claims SET status='executing',amount=?,confirmed_unreturned=?,verification_note=?,operator_id=?,execution_day=?,attempt_id=?,updated_at=?,reserved_at=?,limit_json=NULL WHERE id=?")
           .run(entry.amount,entry.verifiedAmount,entry.note,actor,day,attempt,now,now,entry.id);
         this.event(entry.id,actor,'execution_reserved',{batchId:id,amount:entry.amount,attempt,day});
       }
@@ -370,8 +449,19 @@ export class Store {
     return this.aiReviewKeys(day,userId).length;
   }
   aiReviewKeys(day, userId) {
-    const start = Date.parse(day + 'T00:00:00.000Z'), end = start + 86400000;
-    return this.db.prepare("SELECT DISTINCT COALESCE(review_batch_id,id) AS key FROM ai_reviews WHERE user_id=? AND created_at>=? AND created_at<? AND prompt_version NOT LIKE '%-admin-assist-v1'").all(userId,start,end).map(row=>row.key);
+    return this.db.prepare('SELECT review_key AS key FROM ai_review_runs WHERE user_id=? AND execution_day=?').all(userId,day).map(row=>row.key);
+  }
+  beginAIReview(key,userId,rules,now=Date.now()) {
+    return this.transaction(()=>{
+      if(this.db.prepare('SELECT 1 FROM ai_review_runs WHERE review_key=?').get(key))return;
+      const active=this.rules(),day=settlementClock(now,active).day,used=this.aiReviewCount(day,userId);
+      if(used>=active.aiDailyLimit){
+        const limit={...limitDetail('count','user',used,active.aiDailyLimit,1,active,now),code:'AI_DAILY_COUNT_LIMIT'};
+        limit.message=`AI 自动审核次数已达今日上限 ${used}/${active.aiDailyLimit} 次；${limit.message.split('；').at(-1)}`;
+        throw new AppError(limit.message,429,{code:limit.code,limit});
+      }
+      this.db.prepare('INSERT INTO ai_review_runs VALUES(?,?,?,?)').run(key,userId,now,day);
+    });
   }
   saveAiReview(input) {
     return this.transaction(() => {
@@ -409,12 +499,15 @@ export class Store {
     }
     return {items,total,page};
   }
-  create(log, user, rules, reason, source, actor, notifyPending = true, runId = null) {
+  create(log, user, rules, reason, source, actor, notifyPending = true, runId = null, holdSlot = false) {
     return this.transaction(() => {
       if (this.byRequest(log.request_id)) throw new AppError('这笔消费已申请，请查看已有申请', 409);
       const pending = this.db.prepare("SELECT COUNT(DISTINCT COALESCE(batch_id,id)) AS n FROM claims WHERE user_id=? AND status IN ('pending','approved','executing','unknown')").get(user.id).n;
       if (pending >= rules.maxPending) throw new AppError('待处理申请数量已达上限', 409);
       const id = randomUUID(), now = Date.now();
+      const limit=this.compensationLimit(user.id,id,0,rules,{now,countsOnly:true});
+      if(limit)throwLimit(limit);
+      if(holdSlot)this.holdCompensationSlot(id,user.id,rules,now);
       this.db.prepare("INSERT INTO claims(id,request_id,user_id,username,source,log,rules,reason,status,amount,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'pending',0,?,?)").run(id, log.request_id, user.id, user.username, source, JSON.stringify(log), JSON.stringify(rules), reason, now, now);
       if(runId)this.db.prepare('UPDATE claims SET run_id=? WHERE id=?').run(runId,id);
       const eventId=this.event(id, actor, 'application_created', { source, reason });
@@ -423,23 +516,51 @@ export class Store {
       return this.get(id);
     });
   }
+  hasCompensationCount(key) {
+    return Boolean(this.db.prepare("SELECT 1 FROM compensation_counts n WHERE n.compensation_key=? AND EXISTS(SELECT 1 FROM claims c WHERE COALESCE(c.batch_id,c.id)=n.compensation_key AND c.status IN ('executing','unknown','succeeded'))").get(key));
+  }
+  processingCount(day,userId=null,exceptKey='') {
+    return this.db.prepare('SELECT COUNT(*) AS n FROM compensation_slots WHERE execution_day=? AND compensation_key<>?'+(userId===null?'':' AND user_id=?')).get(...(userId===null?[day,exceptKey]:[day,exceptKey,userId])).n;
+  }
+  compensationLimit(userId,key,amount,rules,{now=Date.now(),countsOnly=false}={}) {
+    const day=settlementClock(now,rules).day,newCount=this.hasCompensationCount(key)?0:1;
+    for(const [owner,scope,quota,count]of [[userId,'user',rules.userDailyQuota,rules.userDailyCount],[null,'site',rules.siteDailyQuota,rules.siteDailyCount]]){
+      const used=this.usage(day,owner),occupied=used.count+this.processingCount(day,owner,key);
+      if(newCount&&occupied+newCount>count)return limitDetail('count',scope,occupied,count,newCount,rules,now);
+      if(!countsOnly&&used.quota+amount>quota)return limitDetail('quota',scope,used.quota,quota,amount,rules,now);
+    }
+    return null;
+  }
+  holdCompensationSlot(key,userId,rules,now=Date.now()) {
+    const limit=this.compensationLimit(userId,key,0,rules,{now,countsOnly:true});
+    if(limit)throwLimit(limit);
+    if(!this.hasCompensationCount(key))this.db.prepare('INSERT OR IGNORE INTO compensation_slots VALUES(?,?,?,?)').run(key,userId,now,settlementClock(now,rules).day);
+  }
+  releaseCompensationSlot(key) { this.db.prepare('DELETE FROM compensation_slots WHERE compensation_key=?').run(key); }
+  reserveCompensationCount(key,userId,rules,now) {
+    if(!this.hasCompensationCount(key))this.db.prepare('INSERT INTO compensation_counts VALUES(?,?,?,?) ON CONFLICT(compensation_key) DO UPDATE SET reserved_at=excluded.reserved_at,execution_day=excluded.execution_day').run(key,userId,now,settlementClock(now,rules).day);
+  }
   usage(day, userId = null) {
     const owner = userId === null ? '' : ' AND user_id=?';
-    return this.db.prepare(`SELECT COALESCE(SUM(amount),0) AS quota, COUNT(DISTINCT COALESCE(batch_id,id)) AS count FROM claims WHERE execution_day=? AND status IN ('executing','unknown','succeeded')${owner}`).get(...(userId === null ? [day] : [day, userId]));
+    const args=userId===null?[day]:[day,userId];
+    const {quota}=this.db.prepare(`SELECT COALESCE(SUM(amount),0) AS quota FROM claims WHERE execution_day=? AND status IN ('executing','unknown','succeeded')${owner}`).get(...args);
+    const {count}=this.db.prepare(`SELECT COUNT(*) AS count FROM compensation_counts n WHERE execution_day=?${userId===null?'':' AND user_id=?'} AND EXISTS(SELECT 1 FROM claims c WHERE COALESCE(c.batch_id,c.id)=n.compensation_key AND c.status IN ('executing','unknown','succeeded'))`).get(...args);
+    return {quota,count};
   }
   reserve(id, actor, amount, verifiedAmount, note, rules, now = Date.now()) {
     return this.transaction(() => {
       const c = this.get(id);
       if (!c || c.status !== 'approved') throw new AppError('申请状态已变化，不能执行', 409);
       if(c.batch_id)throw new AppError('查询批次必须统一补额度，禁止逐条执行',409);
-      if(rules.perBatchQuota>0&&amount>rules.perBatchQuota)throw new AppError('应补额度超过单次补偿上限，未执行补偿',409);
+      const caps=[rules.perBatchQuota,c.rules.perBatchQuota].filter(v=>v>0);
+      if(caps.length&&amount>Math.min(...caps))throwLimit(limitDetail('batch','user',0,Math.min(...caps),amount,rules,now,true));
       const day = settlementClock(now, rules).day;
-      for (const [owner, quota, count] of [[c.user_id, rules.userDailyQuota, rules.userDailyCount], [null, rules.siteDailyQuota, rules.siteDailyCount]]) {
-        const used = this.usage(day, owner);
-        if (used.quota + amount > quota || used.count + 1 > count) throw new AppError(`${owner === null ? '全站' : '用户'}当日额度或次数不足，申请已保留`, 409);
-      }
+      const limit=this.compensationLimit(c.user_id,id,amount,rules,{now});
+      if(limit)throwLimit(limit);
+      this.reserveCompensationCount(id,c.user_id,rules,now);
+      this.releaseCompensationSlot(id);
       const attempt = randomUUID();
-      this.db.prepare("UPDATE claims SET status='executing', amount=?, confirmed_unreturned=?, verification_note=?, operator_id=?, execution_day=?, attempt_id=?, updated_at=?, reserved_at=? WHERE id=?").run(amount, verifiedAmount, note, actor, day, attempt, now, now, id);
+      this.db.prepare("UPDATE claims SET status='executing', amount=?, confirmed_unreturned=?, verification_note=?, operator_id=?, execution_day=?, attempt_id=?, updated_at=?, reserved_at=?,limit_json=NULL WHERE id=?").run(amount, verifiedAmount, note, actor, day, attempt, now, now, id);
       this.event(id, actor, 'execution_reserved', { amount, verifiedAmount, note, attempt, day, ruleVersion: rules.version });
       return this.get(id);
     });
@@ -461,7 +582,7 @@ export class Store {
     const where = userId === null ? '' : 'WHERE user_id=?', args = userId === null ? [] : [userId];
     const totals = this.db.prepare(`SELECT COUNT(*) AS applications, COUNT(DISTINCT CASE WHEN status='succeeded' THEN user_id END) AS compensatedUsers, COALESCE(SUM(CASE WHEN status='succeeded' THEN amount ELSE 0 END),0) AS compensatedQuota, COALESCE(SUM(status='pending'),0) AS pending, COALESCE(SUM(status='unknown'),0) AS unknown, COALESCE(SUM(status='failed'),0) AS failed FROM claims ${where}`).get(...args);
     const r = this.rules(), day = settlementClock(now, r).day;
-    return { ...totals, day, timezone: r.timezone, dailyResetTime: r.dailyResetTime, today: this.usage(day, userId), personalLimit: { quota: r.userDailyQuota, count: r.userDailyCount }, siteToday: this.usage(day), siteLimit: { quota: r.siteDailyQuota, count: r.siteDailyCount } };
+    return { ...totals, day, timezone: r.timezone, dailyResetTime: r.dailyResetTime, nextResetAt:nextResetAt(now,r),today: this.usage(day, userId),processingCount:this.processingCount(day,userId), personalLimit: { quota: r.userDailyQuota, count: r.userDailyCount }, siteToday: this.usage(day),siteProcessingCount:this.processingCount(day), siteLimit: { quota: r.siteDailyQuota, count: r.siteDailyCount } };
   }
   personalStatistics(userId, days = 30, now = Date.now()) {
     if (![7, 30, 90].includes(days)) throw new AppError('时间范围无效');
@@ -469,10 +590,13 @@ export class Store {
     const anchor = Date.parse(today + 'T12:00:00Z');
     const trend = Array.from({length: days}, (_, i) => ({day: new Date(anchor - (days - 1 - i) * 86400000).toISOString().slice(0, 10), quota: 0, count: 0}));
     const range = [trend[0].day, today];
-    const rows = this.db.prepare("SELECT execution_day AS day, SUM(amount) AS quota, COUNT(DISTINCT COALESCE(batch_id,id)) AS count FROM claims WHERE user_id=? AND status='succeeded' AND execution_day BETWEEN ? AND ? GROUP BY execution_day").all(userId, ...range);
+    const rows = this.db.prepare("SELECT execution_day AS day, SUM(amount) AS quota, 0 AS count FROM claims WHERE user_id=? AND status='succeeded' AND execution_day BETWEEN ? AND ? GROUP BY execution_day").all(userId, ...range);
     const byDay = new Map(rows.map(row => [row.day, row]));
+    for(const row of this.db.prepare("SELECT execution_day AS day,COUNT(*) AS count FROM compensation_counts n WHERE user_id=? AND execution_day BETWEEN ? AND ? AND EXISTS(SELECT 1 FROM claims c WHERE COALESCE(c.batch_id,c.id)=n.compensation_key AND c.status='succeeded') GROUP BY execution_day").all(userId,...range)){
+      const point=byDay.get(row.day)||{day:row.day,quota:0,count:0};point.count=row.count;byDay.set(row.day,point);
+    }
     for (const point of trend) Object.assign(point, byDay.get(point.day));
-    return {days, timezone, site: '当前 云中猫API小站 实例', updatedAt: now, quota: rows.reduce((sum, row) => sum + row.quota, 0), count: rows.reduce((sum, row) => sum + row.count, 0), trend};
+    return {days, timezone, site: '当前 云中猫API小站 实例', updatedAt: now, quota: trend.reduce((sum, row) => sum + row.quota, 0), count: trend.reduce((sum, row) => sum + row.count, 0), trend};
   }
   refundRecords(userId, page = 1) {
     const total=this.db.prepare("SELECT COUNT(DISTINCT COALESCE(run_id,id)) AS n FROM claims WHERE user_id=? AND status='succeeded'").get(userId).n;

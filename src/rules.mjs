@@ -1,5 +1,5 @@
 export class AppError extends Error {
-  constructor(message, status = 400) { super(message); this.status = status; }
+  constructor(message, status = 400, details = {}) { super(message); this.status = status; Object.assign(this, details); }
 }
 export const defaults = {
   version: 1, applicationsEnabled: false, executionEnabled: false, selfServiceEnabled: true, selfServiceMaxQuota: 100000, selfServiceMinAgeSeconds: 60, timezone: 'Asia/Shanghai',
@@ -64,8 +64,10 @@ export function validateRules(input) {
   }
   return Object.fromEntries(Object.keys(defaults).map(k => [k, r[k]]));
 }
+const clockFormatters = new Map(), resetBoundaries = new Map();
 export function localClock(now, timezone) {
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(now));
+  if (!clockFormatters.has(timezone)) clockFormatters.set(timezone, new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }));
+  const parts = clockFormatters.get(timezone).formatToParts(new Date(now));
   const p = Object.fromEntries(parts.map(v => [v.type, v.value]));
   return { day: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}` };
 }
@@ -76,10 +78,55 @@ export function isOpen(r, now) {
 }
 export function settlementClock(now, rules) {
   const clock = localClock(now, rules.timezone);
-  if (clock.time >= (rules.dailyResetTime || '00:00')) return clock;
+  if (now >= resetBoundary(clock.day, rules)) return clock;
   const previous = new Date(Date.parse(clock.day + 'T12:00:00Z') - 86400000).toISOString().slice(0, 10);
   return { ...clock, day: previous };
 }
+function resetBoundary(day, rules) {
+  const time = rules.dailyResetTime || '00:00', key = rules.timezone + ':' + day + ':' + time;
+  if (resetBoundaries.has(key)) return resetBoundaries.get(key);
+  const wall = Date.parse(day + 'T' + time + ':00Z'), candidates = new Set();
+  for (const hours of [-36, -12, 0, 12, 36]) {
+    const probe = wall + hours * 3600000, local = localClock(probe, rules.timezone);
+    const offset = Date.parse(local.day + 'T' + local.time + ':00Z') - Math.floor(probe / 60000) * 60000;
+    candidates.add(wall - offset);
+  }
+  const target = day + 'T' + time;
+  const localKey = epoch => { const local = localClock(epoch, rules.timezone); return local.day + 'T' + local.time; };
+  const exact = [...candidates].filter(epoch => localKey(epoch) === target);
+  let result;
+  if (exact.length) result = Math.min(...exact);
+  else {
+    // A skipped local time resumes at the first valid instant after the clock jump.
+    let low = Math.min(...candidates) - 60000, high = Math.max(...candidates) + 60000;
+    while (high - low > 1) { const middle = Math.floor((low + high) / 2); if (localKey(middle) >= target) high = middle; else low = middle; }
+    result = high;
+  }
+  if (resetBoundaries.size > 400) resetBoundaries.clear();
+  resetBoundaries.set(key, result);
+  return result;
+}
+export function nextResetAt(now, rules) {
+  const clock = localClock(now, rules.timezone), today = resetBoundary(clock.day, rules);
+  if (today > now) return today;
+  for (let days = 1; days <= 3; days++) {
+    const day = new Date(Date.parse(clock.day + 'T12:00:00Z') + days * 86400000).toISOString().slice(0, 10);
+    const boundary = resetBoundary(day, rules);
+    if (boundary > now) return boundary;
+  }
+  throw new AppError('无法计算下一次额度恢复时间');
+}
+export function limitDetail(kind, scope, used, maximum, required, rules, now = Date.now(), permanent = false) {
+  const label = scope === 'site' ? '全站' : '用户', quota = kind !== 'count';
+  const code = kind === 'batch' ? 'PER_BATCH_QUOTA_LIMIT' : `${scope.toUpperCase()}_DAILY_${quota ? 'QUOTA' : 'COUNT'}_LIMIT`;
+  const recovery = permanent || required > maximum ? null : nextResetAt(now, rules);
+  const resetText = recovery === null ? '需要管理员调整对应上限后继续' : `将于 ${new Intl.DateTimeFormat('zh-CN', { timeZone: rules.timezone, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(recovery)} 恢复（${rules.timezone}）`;
+  const message = kind === 'batch' ? `应补额度 ${required} 超过单次补偿上限 ${maximum}，未执行补偿；${resetText}`
+    : quota ? `${label}当日额度不足：已用 ${used}，上限 ${maximum}，剩余 ${Math.max(0, maximum - used)}，本次需 ${required}，本次全额保留；${resetText}`
+      : `${label}当日补偿次数已达上限：已用或处理中 ${used}/${maximum} 次；${resetText}`;
+  return { code, kind: quota ? 'quota' : 'count', scope, used, limit: maximum, remaining: Math.max(0, maximum - used), required, nextResetAt: recovery, timezone: rules.timezone, message };
+}
+export function throwLimit(limit) { throw new AppError(limit.message, 409, { code: limit.code, limit }); }
 export function expectedQuota(log, r) {
   positiveInt(log.quota, '原消费额度');
   const amount = Number(BigInt(log.quota) * BigInt(r.refundBasisPoints) / 10000n);
@@ -98,7 +145,7 @@ export function compensationLabel(log, source = 'self') {
 export function modelExcluded(log, rules) {
   return (rules.excludedModels || []).some(entry => entry.channelId === log.channel && entry.model === log.model_name);
 }
-export function assessLog(log, user, r, now = Date.now()) {
+export function assessLog(log, user, r, now = Date.now(), accepted = null) {
   const result = { candidate: false, eligible: false, evidence: 'pending', reasons: [], expectedQuota: 0, deadline: null };
   if (log.user_id !== user.id) { result.reasons.push('不是本人的消费'); return result; }
   if (modelExcluded(log, r)) { result.reasons.push('该模型不参与补偿，已跳过空回检测'); return result; }
@@ -113,7 +160,8 @@ export function assessLog(log, user, r, now = Date.now()) {
   if (!Number.isSafeInteger(log.created_at) || log.created_at <= 0 || log.created_at * 1000 > now) result.reasons.push('消费时间无效');
   else {
     result.deadline = log.created_at * 1000 + r.applicationHours * 3600000;
-    if (now > result.deadline) result.reasons.push('已超过申请有效期');
+    const acceptedInTime = Number.isFinite(accepted?.acceptedAt) && accepted.acceptedAt >= log.created_at * 1000 && accepted.acceptedAt <= log.created_at * 1000 + (accepted.applicationHours || r.applicationHours) * 3600000;
+    if (now > result.deadline && !acceptedInTime) result.reasons.push('已超过申请有效期');
   }
   if (!r.channels.includes(log.channel)) result.reasons.push('渠道未开放补偿');
   const retired=r.retiredModelKeys?.includes(log.channel+':'+log.model_name);
@@ -131,8 +179,8 @@ export function publicLog(log) {
   return {...Object.fromEntries(['request_id', 'created_at', 'model_name', 'quota', 'prompt_tokens', 'completion_tokens', 'is_stream'].map(k => [k, log[k]])),fundingSource:fundingSource(log)};
 }
 
-export function selfServiceDecision(log, user, rules, now = Date.now(), aiReview = null) {
-  const assessment = assessLog(log, user, rules, now), reasons = [...assessment.reasons];
+export function selfServiceDecision(log, user, rules, now = Date.now(), aiReview = null, accepted = null) {
+  const assessment = assessLog(log, user, rules, now, accepted), reasons = [...assessment.reasons];
   let other;try{other=typeof log.other==='string'?JSON.parse(log.other):log.other;}catch{}
   if(!other||typeof other!=='object'||Array.isArray(other))other={};
   const reject=other.admin_info?.reject_reason||other.reject_reason;

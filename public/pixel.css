@@ -1890,6 +1890,12 @@ html,body{color-scheme:light!important;background:var(--px-paper)!important;colo
 .amount-summary strong{font:800 20px/1.4 var(--px-mono);overflow-wrap:anywhere}
 .amount-summary strong small{font-size:12px;font-weight:400;line-height:1.4;color:var(--muted)}
 .amount-panel-actions{display:flex;gap:10px;flex-wrap:wrap}
+.query-batch .batch-limit{margin:12px 0;overflow-wrap:anywhere;line-height:1.8}
+.query-batch footer{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.query-batch footer .field-help{flex:1 1 240px}
+.query-backfill form{margin:0}
+.query-backfill input{max-width:100%;min-width:0}
+.query-backfill [data-form-feedback]:empty{display:none}
 .amount-panel button{display:inline-flex;align-items:center;justify-content:center;gap:7px;font-size:12px}
 .amount-panel button svg{width:16px;height:16px;flex:none}
 .amount-verification{align-items:flex-start;gap:10px;padding:12px;background:var(--px-yellow);font-size:12px;line-height:1.6}
