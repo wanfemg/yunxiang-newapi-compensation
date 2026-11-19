@@ -39,6 +39,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
   const sessionHours = Number(process.env.SESSION_HOURS || 8);
   const normalSessionSeconds = Number.isSafeInteger(sessionHours) && sessionHours >= 1 && sessionHours <= 720 ? sessionHours * 3600 : 28800;
   const rememberSessionSeconds = Math.max(normalSessionSeconds, 30 * 24 * 3600);
+  const backgroundJobs=new Map();
   async function queueEmails(claims,actor){
     if(!emailNotifications)return;
     try{
@@ -47,6 +48,15 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       try{store.event(null,actor,'email_notification_enqueue_failed',{claimIds:claims.map(c=>c.id)});}catch{console.error('Email notification enqueue failed');}
     }
   }
+  function finishBackground(id,completion,actor){
+    if(backgroundJobs.has(id))return;
+    const job=completion.catch(()=>{console.error('Background batch review interrupted');}).then(async()=>{
+      store.notifyClaimsBatch(id);
+      await queueEmails(store.batchClaims(id),actor);
+    }).catch(()=>{console.error('Background batch notification failed');}).finally(()=>{backgroundJobs.delete(id);});
+    backgroundJobs.set(id,job);
+  }
+  async function drain(){while(backgroundJobs.size)await Promise.allSettled([...backgroundJobs.values()]);}
   function setSession(res, token, user, remember = false) {
     const raw = randomBytes(32).toString('base64url'), csrf = randomBytes(24).toString('base64url');
     const maxAge = remember ? rememberSessionSeconds : normalSessionSeconds;
@@ -224,7 +234,14 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
       const queryBatch=path.match(/^\/api\/batches\/([a-f0-9-]{36})(\/submit)?$/);
       if(queryBatch&&req.method==='GET'&&!queryBatch[2])return send(await service.batches.view(user,queryBatch[1]));
       if(queryBatch&&req.method==='POST'&&queryBatch[2]){
-        const body=await readBody(req),result=await service.batches.submit(user,queryBatch[1],body.reason||'申请整批核验空回补偿');
+        const body=await readBody(req);
+        if(body.background===true){
+          const {batch,completion}=await service.batches.submitBackground(user,queryBatch[1],body.reason||'申请整批核验空回补偿');
+          finishBackground(batch.id,completion,user.id);
+          res.statusCode=202;
+          return send(batch);
+        }
+        const result=await service.batches.submit(user,queryBatch[1],body.reason||'申请整批核验空回补偿');
         store.notifyClaimsBatch(result.id);
         await queueEmails(store.batchClaims(result.id),user.id);
         return send(result);
@@ -352,7 +369,7 @@ export function createApplication({ store, upstream, origin = 'http://127.0.0.1:
     emailNotifications?.flush().catch(() => console.error('Email notification worker failed'));
   }, 15000);
   timer.unref(); server.on('close', () => clearInterval(timer));
-  return { server, service };
+  return { server, service, drain };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
@@ -366,7 +383,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   if (new URL(origin).protocol !== 'https:' && !['127.0.0.1', 'localhost', '[::1]'].includes(new URL(origin).hostname)) throw new Error('公网访问的 PUBLIC_ORIGIN 必须为 HTTPS');
   const dingTalk = new DingTalk(store, data);
   const emailNotifications = new EmailNotifications(store, data, {upstream});
-  const { server } = createApplication({ store, upstream, origin, dingTalk, emailNotifications });
+  const { server, drain } = createApplication({ store, upstream, origin, dingTalk, emailNotifications });
   server.listen(port, host, () => console.log(`云中猫API小站 补空回已启动：${origin}（未配置上游时仅显示登录入口）`));
-  for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => server.close(() => { store.close(); process.exit(0); }));
+  for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => server.close(async() => { await drain(); store.close(); process.exit(0); }));
 }

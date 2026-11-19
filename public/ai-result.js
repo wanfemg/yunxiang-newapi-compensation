@@ -1,3 +1,8 @@
+export function formatAIProbability(value){
+  if(!Number.isFinite(value)||value<0||value>1)return null;
+  // Truncate so a score below the threshold never appears to have reached it.
+  return String(Math.trunc(value*1_000_000)/10_000);
+}
 export function aiDecisionForThreshold(review,threshold=90){
   const probability=review?.analysis?.emptyProbability;
   if(review?.status==='completed'&&Number.isFinite(probability)){
@@ -13,7 +18,8 @@ export function aiResultLabel(review,mode='automatic',threshold=90){
   const probability=review.analysis?.emptyProbability;
   if(Number.isFinite(probability)){
     const decision=aiDecisionForThreshold(review,threshold);
-    return decision==='empty'?'初审结论：空回概率达到阈值，自动补偿':decision==='not_empty'?'初审结论：更倾向非空回，转人工审核':'初审结论：空回概率未达到阈值，转人工审核';
+    const prefix=mode==='historical'?'历史审核参考：':'初审结论：';
+    return prefix+(decision==='empty'?'达到 AI 自动补偿标准':decision==='not_empty'?'更倾向已有有效回答，转人工审核':'空回概率未达到阈值，转人工审核');
   }
   if(review.decision==='uncertain')return '初审结论：AI 未返回有效空回概率，转人工审核';
   return {empty:'初审结论：疑似空回',not_empty:'初审结论：非空回',uncertain:'初审结论：空回概率未达到阈值，转人工审核'}[review.decision]||'初审结果格式异常，需人工核实';

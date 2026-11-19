@@ -1,12 +1,19 @@
 import { createHash } from 'node:crypto';
-import { AppError, assessLog, expectedQuota, fundingSource } from './rules.mjs';
+import { AppError, assessLog, fundingSource, modelExcluded } from './rules.mjs';
 
 const decisionSet = new Set(['empty', 'not_empty', 'uncertain']);
 const recommendationSet = new Set(['approve','reject','manual']);
 const safe = (value, max = 4000) => String(value ?? '').slice(0, max);
 const DEFAULT_PROMPT = '你是额度补偿审核助手。结合消费日志、系统提取的信号和补偿规则判断该日志是否为空回。自动初审与管理员复核会分别提供各自的输出格式要求。只引用输入中存在的事实，不决定补偿金额，不执行补偿操作。';
-const AUTO_REVIEW_GUIDANCE = '\n\n自动判定执行准则：主要输出 empty_probability，即“该日志确属空回”的概率，范围 0 到 1；这不是对 uncertain 标签的信心，也不是对任意结论的置信度。系统已筛出已扣费且 completion_tokens=0 的候选日志，并提供结构化核验结果。综合日志字段、knownSignals、reject_reason、退款、工具/多模态/推理信号和规则评估概率。日志完整、已扣费、输出 token 为零且无退款或成功输出证据时，应给高概率；发现成功输出、退款或明确矛盾证据时给低概率；仅关键字段缺失或证据实质矛盾时才给中间概率。站长设置的自动补偿阈值为 {{AI_AUTO_THRESHOLD}}%：empty_probability 达到或超过该值即为空回并自动补偿；低于该值转管理员复核。不得以 uncertain 标签覆盖达到阈值的概率，不得把“对不确定结论有信心”当成空回概率。必须只返回 JSON：{"empty_probability":0到1,"reason":"简短中文判断原因","evidence":["引用具体日志字段和值"]}。不得编造日志事实。';
-const ADMIN_PROMPT = '\n\n当前任务是站长的二次复核：独立核对消费日志、补偿规则和 previousReview 中的初审结论，指出初审是否与事实一致，不得把初审结论当作事实。综合评估证据是否足以通过申请，说明仍需人工核查的风险。只返回 JSON：{"decision":"empty|not_empty|uncertain","confidence":0到1,"recommendation":"approve|reject|manual","summary":"综合判断","reason":"判断原因","evidence":["逐条可核对的依据"]}。仅当日志和规则均支持空回、证据充分且无明显风险时 recommendation 才可为 approve；明确不符合规则时为 reject；证据不足、矛盾或结果不确定时为 manual。不得决定金额，不得执行操作。';
+const AUTO_REVIEW_GUIDANCE = '\n\n自动判定：输出 empty_probability，即“该日志确属空回”的概率，必须是 0 到 1 的 JSON 数值，不是对任意结论的置信度。候选日志已扣费且 completion_tokens=0；结合 knownSignals 和 rules 评估，有效回答、退款、工具/多模态/推理输出都应核对。日志完整、已扣费、零输出且无退款或成功输出证据时给高概率；有成功输出、退款或明确矛盾给低概率；仅关键证据不足或矛盾时给中间概率。站长设置的自动补偿阈值为 {{AI_AUTO_THRESHOLD}}%：概率达标自动补偿，未达标转管理员复核，不代表申请被拒绝。不得用 uncertain 标签覆盖达标概率。reason 用日常中文，先说已发现的事实，再解释为什么支持空回或还需核对什么，避免只说“证据不足”和堆砌英文术语；不超过 100 字。evidence 最多 3 条，每条用中文解释具体字段和值。不输出思考过程，不编造事实。只返回一个 JSON 对象，必须包含 empty_probability（数值）、reason（字符串）、evidence（字符串数组），不添加其他文字。';
+const ADMIN_PROMPT = '\n\n当前任务是站长二次复核：独立核对消费日志、规则和 previousReview，初审结论不是事实。只返回 JSON：{"decision":"empty|not_empty|uncertain","confidence":0到1,"recommendation":"approve|reject|manual","summary":"综合判断","reason":"判断原因","evidence":["可核对的依据"]}。证据充分支持空回且无明显风险才 approve；明确不符合规则才 reject；证据不足或矛盾则 manual。summary 不超过 60 字；reason 用日常中文、不超过 120 字，说明实际发生了什么、为什么支持或不支持补偿、还需要管理员核对什么。manual 必须说明需要人工核对的具体信息，不得写成申请已被拒绝；evidence 最多 3 条，每条用中文解释具体字段和值。不输出思考过程，不决定金额，不执行操作，不编造事实。';
+
+function parseReviewJSON(content) {
+  const text = content.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, '$1');
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new SyntaxError('审核结果不是 JSON 对象');
+  return parsed;
+}
 
 export function normalizeAIBaseURL(value) {
   let url;
@@ -46,10 +53,29 @@ export class AIReviewer {
       prompt: String(stored.prompt ?? this.env.AI_PROMPT ?? DEFAULT_PROMPT).trim() || DEFAULT_PROMPT
     };
   }
-  redact(value, config = this.config()) {
+  redact(value, config = this.config(), max = 240) {
     let text = String(value ?? '');
     if (config.apiKey) text = text.replaceAll(config.apiKey, '[已隐藏密钥]');
-    return text.replace(/Bearer\s+\S+/gi, 'Bearer [已隐藏]').replace(/sk-[a-zA-Z0-9_-]+/g, '[已隐藏密钥]').replace(/[\r\n\t<>]/g, ' ').slice(0, 240);
+    return text.replace(/Bearer\s+\S+/gi, 'Bearer [已隐藏]').replace(/sk-[a-zA-Z0-9_-]+/g, '[已隐藏密钥]').replace(/[\r\n\t<>]/g, ' ').slice(0, max);
+  }
+  failureReason(error) {
+    const detail = String(error?.message || '');
+    const reason = error instanceof SyntaxError ? 'AI 返回的审核内容格式不正确，系统没有采纳这次结果'
+      : /HTTP 401/.test(detail) ? 'AI 服务的访问密钥无效或已过期，暂时无法自动审核'
+      : /HTTP 403/.test(detail) ? 'AI 服务拒绝本次调用，管理员需要检查密钥权限或访问设置'
+      : /HTTP 404/.test(detail) ? '当前 AI 模型或接口地址不可用，暂时无法自动审核'
+      : /HTTP 402/.test(detail) ? 'AI 服务余额不足，暂时无法自动审核'
+      : /HTTP 429/.test(detail) ? 'AI 服务当前请求过多或余额不足，暂时无法自动审核'
+      : /HTTP (400|422)/.test(detail) ? 'AI 服务不支持当前模型或请求格式，管理员需要检查模型和接口设置'
+      : /HTTP 413/.test(detail) ? '这条消费的日志超过 AI 服务可处理的长度，本次无法自动审核'
+      : /超时|TimeoutError|AbortError/.test(detail) ? 'AI 在规定时间内没有回复，本次没有完成自动审核'
+      : /HTTP 5\d\d/.test(detail) ? 'AI 服务暂时故障，本次没有完成自动审核'
+      : /域名解析|连接被拒绝|网络连接|证书/.test(detail) ? '暂时连接不上 AI 服务，本次没有完成自动审核'
+      : /未返回有效文本/.test(detail) ? 'AI 没有返回审核结论，本次没有完成自动审核'
+      : /JSON|响应格式/.test(detail) ? 'AI 返回的审核内容格式不正确，系统没有采纳这次结果'
+      : /API 地址/.test(detail) ? 'AI 接口地址填写不正确，管理员需要检查接口设置'
+      : 'AI 服务本次未能完成审核';
+    return reason + '，已转管理员审核。';
   }
   async request(path, options = {}, c = this.config()) {
     if (!c.baseUrl || !c.apiKey) throw new AppError('AI API 地址或密钥未配置', 400);
@@ -143,43 +169,52 @@ export class AIReviewer {
     }
     if (!this.configured()) return this.store.saveAiReview({
       requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion, reviewBatchId: batchId,
-      decision: 'uncertain', confidence: 0, reason: 'AI 服务未配置，转管理员审核', evidence: [], rawResponse: null, status: 'fallback'
+      decision: 'uncertain', confidence: 0, reason: '管理员尚未配置 AI 服务，本次无法自动审核，已转管理员审核。', evidence: [], rawResponse: null, status: 'fallback'
     });
     const config = this.config();
     const assessment = assessLog(log,{id:log.user_id},rules,this.now());
     let other;try{other=typeof log.other==='string'?JSON.parse(log.other||'{}'):log.other||{};}catch{other={};}
+    if (!other || typeof other !== 'object' || Array.isArray(other)) other = {};
+    const relevantRules = {
+      aiAutoThreshold: rules.aiAutoThreshold, refundBasisPoints: rules.refundBasisPoints,
+      perRecordQuota: rules.perRecordQuota, perBatchQuota: rules.perBatchQuota,
+      channelAllowed: rules.channels.includes(log.channel),
+      modelAllowed: rules.restrictModels === false || rules.models.includes(log.model_name) || Boolean(rules.retiredModelKeys?.includes(log.channel + ':' + log.model_name)),
+      modelExcluded: modelExcluded(log, rules)
+    };
     const payload = {
       model: config.model,
       temperature: 0,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: config.prompt+(mode==='admin'?ADMIN_PROMPT:AUTO_REVIEW_GUIDANCE.replace('{{AI_AUTO_THRESHOLD}}',String(rules.aiAutoThreshold))) },
-        { role: 'user', content: JSON.stringify({ log: { request_id: log.request_id, user_id: log.user_id, model_name: log.model_name, channel: log.channel, quota: log.quota, prompt_tokens: log.prompt_tokens, completion_tokens: log.completion_tokens, is_stream: log.is_stream, created_at: log.created_at, other: safe(log.other) }, knownSignals:{candidate:assessment.candidate,eligible:assessment.eligible,evidence:assessment.evidence,ruleReasons:assessment.reasons,expectedQuota:assessment.expectedQuota,fundingSource:fundingSource(log),rejectReason:safe(other.admin_info?.reject_reason||other.reject_reason||'',500),hasToolOutput:Boolean(other.tool_calls?.length||other.function_call||other.tool_surcharges?.length),hasMultimodalOrReasoningOutput:Boolean(other.image_output||other.audio_output||other.reasoning_tokens||other.thoughts_tokens),hasRefundMarker:['refunded','refunded_quota','refund_quota','refund_amount','refund_status'].some(key=>other[key]!==undefined&&![false,0,'0','none','not_refunded'].includes(other[key]))}, rules: { aiAutoThreshold:rules.aiAutoThreshold,refundBasisPoints: rules.refundBasisPoints, perRecordQuota:rules.perRecordQuota,perBatchQuota:rules.perBatchQuota,excludedModels: rules.excludedModels, models: rules.models },...(mode==='admin'?{previousReview:previousReview?{decision:previousReview.decision,confidence:previousReview.confidence,reason:previousReview.reason,evidence:previousReview.evidence}:null}: {}) }) }
+        { role: 'user', content: JSON.stringify({ log: { request_id: log.request_id, user_id: log.user_id, model_name: log.model_name, channel: log.channel, quota: log.quota, prompt_tokens: log.prompt_tokens, completion_tokens: log.completion_tokens, is_stream: log.is_stream, created_at: log.created_at, other: safe(typeof log.other === 'string' ? log.other : JSON.stringify(other)) }, knownSignals:{candidate:assessment.candidate,eligible:assessment.eligible,evidence:assessment.evidence,ruleReasons:assessment.reasons,expectedQuota:assessment.expectedQuota,fundingSource:fundingSource(log),rejectReason:safe(other.admin_info?.reject_reason||other.reject_reason||'',500),hasToolOutput:Boolean(other.tool_calls?.length||other.function_call||other.tool_surcharges?.length),hasMultimodalOrReasoningOutput:Boolean(other.image_output||other.audio_output||other.reasoning_tokens||other.thoughts_tokens),hasRefundMarker:['refunded','refunded_quota','refund_quota','refund_amount','refund_status'].some(key=>other[key]!==undefined&&![false,0,'0','none','not_refunded'].includes(other[key]))}, rules: relevantRules,...(mode==='admin'?{previousReview:previousReview?{decision:previousReview.decision,confidence:previousReview.confidence,reason:previousReview.reason,evidence:previousReview.evidence}:null}: {}) }) }
       ]
     };
     try {
       const content = await this.chat(payload.messages, {temperature: payload.temperature, response_format: payload.response_format}, config);
-      const parsed = JSON.parse(content);
-      const probability=Number(parsed?.empty_probability);
-      const hasProbability=Number.isFinite(probability)&&probability>=0&&probability<=1;
+      const parsed = parseReviewJSON(content);
+      const probability=parsed.empty_probability;
+      const hasProbability=typeof probability==='number'&&Number.isFinite(probability)&&probability>=0&&probability<=1;
       const confidence=hasProbability?Math.max(probability,1-probability):Math.max(0,Math.min(1,Number(parsed?.confidence)||0));
       const decision=hasProbability
         ?probability>=rules.aiAutoThreshold/100?'empty':probability<=1-rules.aiAutoThreshold/100?'not_empty':'uncertain'
         :mode==='automatic'?'uncertain':decisionSet.has(parsed?.decision)?parsed.decision:'uncertain';
       const analysis=mode==='admin'?{
         recommendation:recommendationSet.has(parsed?.recommendation)?parsed.recommendation:'manual',
-        summary:safe(parsed?.summary,1200)||'AI 未提供综合判断'
-      }:null;
+        summary:this.redact(typeof parsed.summary==='string'?parsed.summary:'',config,1200)||'AI 未提供综合判断'
+      }:!hasProbability?{responseIssue:'invalid_probability'}:null;
+      const modelReason=this.redact(typeof parsed.reason==='string'?parsed.reason:typeof parsed.summary==='string'?parsed.summary:'',config,1000);
       return this.store.saveAiReview({
         requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion, reviewBatchId: batchId,
-        decision, confidence, reason: !hasProbability&&mode==='automatic'?`AI 未返回有效空回概率，转管理员审核。${safe(parsed?.reason,800)}`:safe(parsed?.reason, 1000)||safe(parsed?.summary,1000)||'AI 未提供理由',
-        evidence: Array.isArray(parsed?.evidence) ? parsed.evidence.slice(0, 12).map(v => safe(v, 300)) : [],
+        decision, confidence, reason: !hasProbability&&mode==='automatic'?`AI 未返回有效空回概率，审核结果格式不正确，系统无法自动补偿，已转管理员审核。${modelReason?`AI 说明：${modelReason}`:''}`:modelReason||'AI 未提供具体原因，请管理员结合原消费日志核对。',
+        evidence: Array.isArray(parsed?.evidence) ? parsed.evidence.filter(v=>typeof v==='string').slice(0, 12).map(v => this.redact(v,config,300)) : [],
         rawResponse: safe(content, 8000), status: 'completed',analysis:hasProbability?{...analysis,emptyProbability:probability}:analysis
       });
     } catch (error) {
       return this.store.saveAiReview({
         requestId: log.request_id, userId: log.user_id, fingerprint, promptVersion, reviewBatchId: batchId,
-        decision: 'uncertain', confidence: 0, reason: 'AI 请求失败，转管理员审核', evidence: [this.redact(error.message, config)], rawResponse: null, status: 'failed'
+        decision: 'uncertain', confidence: 0, reason: this.failureReason(error), evidence: [this.redact(error.message, config)], rawResponse: null, status: 'failed'
       });
     }
   }

@@ -11,6 +11,24 @@ import {renderQueryBatch} from '../public/query-batches.js';
 import {groupAuditEvents,renderAuditLog} from '../public/audit-log.js';
 
 async function queried(f){return (await f.service.logs(user,{refresh:true})).batches[0];}
+
+test('后台申请仍在接收前校验本人和开放状态，不创建未接收的记录',async t=>{
+  const f=fixture();t.after(()=>f.store.close());const b=await queried(f);
+  await assert.rejects(f.service.batches.submitBackground(admin,b.id),/本人的/);
+  await assert.rejects(f.service.batches.submitBackground({...user,id:8},b.id),/不存在/);
+  f.service.saveRules(admin,{...f.store.rules(),applicationsEnabled:false});
+  await assert.rejects(f.service.batches.submitBackground(user,b.id),/暂未开放/);
+  assert.equal(f.store.batchClaims(b.id).length,0);assert.equal(f.store.queryBatch(b.id).status,'open');assert.equal(f.calls(),0);
+});
+
+test('后台任务意外中断后保留申请转人工，不重复自动审查或发放',async t=>{
+  const f=fixture();t.after(()=>f.store.close());const b=await queried(f);
+  f.service.batches.finishJudging=async()=>{throw Error('interrupted');};
+  const task=await f.service.batches.submitBackground(user,b.id);
+  assert.equal(task.batch.status,'judging');await assert.rejects(task.completion,/interrupted/);
+  assert.equal(f.store.queryBatch(b.id).status,'review');assert.match(f.store.queryBatch(b.id).note,/已保留/);
+  await f.service.batches.submit(user,b.id);assert.equal(f.calls(),0);assert.equal(f.store.batchClaims(b.id).length,1);
+});
 test('真实 AI 同批限额为一次：通过先补，其余人工审核后仅补剩余',async t=>{
   const credits=[],f=fixture({logs:[log('pass'),log('unsure',{id:101})],rules:{aiEnabled:true,aiDailyLimit:1,userDailyCount:1},credit:(...args)=>credits.push(args)});t.after(()=>f.store.close());
   const {AIReviewer}=await import('../src/ai-review.mjs');let reviews=0;
@@ -33,6 +51,20 @@ test('批次 AI 审核并发提速且限制为 4 个同时请求',async t=>{
   }});
   const batch=await queried(f),result=await f.service.batches.submit(user,batch.id);
   assert.equal(result.status,'succeeded');assert.equal(maxActive,4);
+});
+
+test('整批付款前原消费核验最多四路并行，仍全部完成后才发放',async t=>{
+  const logs=Array.from({length:8},(_,i)=>log('final-parallel-'+i,{id:i+1,quota:2}));
+  const f=fixture({logs});t.after(()=>f.store.close());
+  const batch=await queried(f);
+  f.store.enrollBatch(batch.id,logs,user,f.store.rules(),'核实全部空回',user.id);
+  for(const claim of f.store.batchClaims(batch.id))f.store.transition(claim.id,['pending'],'approved',admin.id,'人工核实');
+  f.store.updateBatch(batch.id,'review','待合并发放');
+  const read=f.upstream.log;let active=0,maxActive=0,reads=0;
+  f.upstream.log=async id=>{active++;maxActive=Math.max(maxActive,active);assert.equal(f.calls(),0);await new Promise(resolve=>setTimeout(resolve,20));active--;reads++;return read(id);};
+  const start=performance.now(),result=await f.service.batches.settle(admin,batch.id);
+  t.diagnostic('8 笔付款前核验耗时 '+Math.round(performance.now()-start)+' ms；峰值并发 '+maxActive);
+  assert.equal(result.status,'succeeded');assert.equal(reads,8);assert.equal(maxActive,4);assert.equal(f.calls(),1);
 });
 test('一次查询跨多个模型和分页：全部判定结束，只向原站合计加额度一次',async t=>{
   const credits=[],f=fixture({logs:Array.from({length:35},(_,i)=>log('multi-'+i,{id:i,quota:2,model_name:i%2?'a':'b'})),rules:{models:['a','b'],userDailyCount:1,maxPending:1},credit:(...args)=>credits.push(args)});t.after(()=>f.store.close());

@@ -1870,3 +1870,72 @@ html,body{color-scheme:light!important;background:var(--px-paper)!important;colo
 @media(max-width:700px){.audit-workspace .audit-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px!important;padding:10px!important}.audit-workspace .audit-metrics>div{min-height:76px;padding:10px!important}.audit-workspace .audit-list{padding:9px!important}.audit-workspace .audit-entry{padding:13px!important;gap:9px!important}.panel-head{padding-top:25px!important}}
 @media(max-width:600px){.px-loading{grid-template-columns:68px minmax(0,1fr);gap:10px;padding:16px!important}.px-loading-pet{width:68px}.px-loading-cat{width:64px;height:42px}.px-loading-bubble{font-size:7px}}
 @media(prefers-reduced-motion:reduce){.query-wait-cat img,.query-cat-bubble-pop,.query-wait-track i,.px-loading-track i,.spinner,button.is-loading:after{animation:none!important}.query-wait-track i,.px-loading-track i{width:100%;transform:none}}
+
+/* Administrator review keeps related amounts and actions in aligned rows. */
+#operation-dialog:has([data-amount-panel]),#detail-dialog:has(.claim-model){width:min(1000px,calc(100vw - 32px))}
+#detail-dialog:has(.claim-model) .group-action-bar{padding:14px 0;border-block:2px solid var(--px-paper-2);margin-bottom:12px}
+#detail-dialog:has(.claim-model) .group-totals{padding:16px 0;gap:16px}
+.claim-model-items{gap:0;padding:0!important}
+.claim-model-items .claim-line{grid-template-columns:minmax(240px,1.1fr) minmax(0,1fr) auto;align-items:center;gap:16px;padding:15px 4px!important;border:0!important;border-bottom:1px solid var(--px-paper-2)!important;border-radius:0!important;box-shadow:none!important;background:transparent!important}
+.claim-model-items .claim-line-main{grid-column:auto;gap:10px}
+.claim-model-items .claim-line-main strong{font-size:16px}
+.claim-model-items .claim-line-main .badge{white-space:nowrap}
+.claim-model-items .claim-request{font-size:12px;line-height:1.6}
+.claim-model-items .claim-request small{margin-top:3px}
+.claim-model-items .claim-line>button{align-self:center;white-space:nowrap}
+.amount-panel{gap:14px;padding:0!important;background:transparent!important;border:0!important;box-shadow:none!important}
+.amount-summary{display:grid;grid-template-columns:1fr 1fr 1.5fr;gap:16px;padding:16px 0;border-block:2px solid var(--px-paper-2)}
+.amount-summary>div{display:grid;gap:6px;min-width:0}
+.amount-summary>div>span{font-size:12px;color:var(--muted)}
+.amount-summary strong{font:800 20px/1.4 var(--px-mono);overflow-wrap:anywhere}
+.amount-summary strong small{font-size:12px;font-weight:400;line-height:1.4;color:var(--muted)}
+.amount-panel-actions{display:flex;gap:10px;flex-wrap:wrap}
+.amount-panel button{display:inline-flex;align-items:center;justify-content:center;gap:7px;font-size:12px}
+.amount-panel button svg{width:16px;height:16px;flex:none}
+.amount-verification{align-items:flex-start;gap:10px;padding:12px;background:var(--px-yellow);font-size:12px;line-height:1.6}
+.amount-verification input{flex:none;margin-top:3px}
+.amount-verification small{display:block;font-size:11px;font-weight:400;margin-top:4px}
+.amount-feedback{margin:0;font-size:12px;color:var(--ink)}
+.amount-feedback:empty,.amount-panel [data-amount-error]:empty{display:none}
+.amount-model{padding:0;border-top:2px solid var(--px-ink)}
+.amount-model-heading{display:flex;align-items:center;gap:10px;padding:14px 0;min-width:0;flex-wrap:wrap}
+.amount-model-heading h3{font-size:15px;margin:0;min-width:0;overflow-wrap:anywhere;flex:1}
+.amount-model-heading>span{font-size:12px;color:var(--muted);white-space:nowrap}
+.amount-model-heading>button{margin-left:auto}
+.amount-tools{display:flex;align-items:end;gap:10px;padding:0 0 14px;margin:0;flex-wrap:wrap}
+.amount-tools label{flex:0 1 210px;font-size:11px;gap:5px}
+.amount-tools>span{flex:1 1 220px;padding-bottom:3px}
+.amount-tools input{width:100%}
+.amount-panel .amount-entry{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,210px) 190px;gap:8px 20px;align-items:center;margin:0;padding:16px 0!important;border:0!important;border-bottom:1px solid var(--px-paper-2)!important;border-radius:0!important;box-shadow:none!important;background:transparent!important}
+.amount-entry-main{display:grid;gap:5px;min-width:0}
+.amount-entry-main>strong{font:600 13px/1.7 var(--px-mono);overflow-wrap:anywhere}
+.amount-entry-main>.field-help{font-size:12px}
+.amount-entry-values{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;min-width:0}
+.amount-entry-values>span{display:grid;gap:5px;font-size:12px;color:var(--muted)}
+.amount-entry-values strong{font:700 14px/1.5 var(--px-mono);color:var(--ink);overflow-wrap:anywhere}
+.amount-entry-control{min-width:0;font-size:12px;gap:5px}
+.amount-entry-control input{width:100%;font:600 14px/1.5 var(--px-mono)}
+.amount-entry-feedback{grid-column:1/-1;margin:0;font-size:11px;color:var(--muted);line-height:1.7;overflow-wrap:anywhere}
+.amount-entry[data-amount-state=warning] .amount-entry-feedback,.amount-entry[data-amount-state=invalid] .amount-entry-feedback{color:var(--danger)}
+.amount-entry[data-amount-state=warning],.amount-entry[data-amount-state=invalid]{border-bottom-color:var(--danger)!important}
+.amount-entry input[aria-invalid=true]{outline:2px solid var(--danger)}
+.amount-limit-note{margin:0}
+@media(max-width:700px){
+  #operation-dialog:has([data-amount-panel]),#detail-dialog:has(.claim-model){width:calc(100vw - 24px);padding:18px}
+  .claim-model-items .claim-line{grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:14px 0!important}
+  .claim-model-items .claim-line-main{grid-column:1/-1}
+  .claim-model-items .claim-line>button{padding:8px;font-size:11px}
+  .amount-summary{gap:10px;grid-template-columns:1fr 1fr}
+  .amount-summary>div:last-child{grid-column:1/-1}
+  .amount-summary strong{font-size:18px}
+  .amount-panel-actions button{flex:1;min-width:0}
+  .amount-model-heading{gap:8px}
+  .amount-model-heading h3{flex:1 1 65%}
+  .amount-model-heading>button{margin:0;justify-content:flex-start;max-width:100%;padding-inline:10px;white-space:normal}
+  .amount-tools label{flex:1 1 140px}
+  .amount-tools>span{flex-basis:100%}
+  .amount-panel .amount-entry{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;padding:15px 0!important}
+  .amount-entry-main{grid-column:1/-1}
+  .amount-entry-values{gap:8px}
+  .amount-entry-control{align-self:end}
+}

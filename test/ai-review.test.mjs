@@ -111,7 +111,7 @@ test('自动审核缺少空回概率时，不接受旧 decision/confidence 直�
   f.service.ai=new AIReviewer({store:f.store,env:{AI_BASE_URL:'http://ai.test/v1',AI_API_KEY:'key',AI_MODEL:'fixture'},fetcher:async()=>new Response(JSON.stringify({choices:[{message:{content:'{"decision":"empty","confidence":0.99,"reason":"模型返回旧格式"}'}}]}))});
   const result=await f.service.selfService(user,'fixture-request-1');
   assert.equal(result.status,'pending');
-  assert.match(result.review_note,/概率未达到/);
+  assert.match(result.review_note,/未返回有效空回概率/);
   const review=f.service.view(f.store.get(result.id),true).aiReview;
   assert.equal(review.decision,'uncertain');
   assert.match(review.reason,/未返回有效空回概率/);

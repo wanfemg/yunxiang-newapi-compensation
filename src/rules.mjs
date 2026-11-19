@@ -105,6 +105,7 @@ export function assessLog(log, user, r, now = Date.now()) {
   if (log.type !== 2 || !Number.isSafeInteger(log.quota) || log.quota <= 0 || log.completion_tokens !== 0) { result.reasons.push('不满足已扣费且输出 token 为零的候选条件'); return result; }
   result.candidate = true;
   let other; try { other = typeof log.other === 'string' ? JSON.parse(log.other || '{}') : (log.other || {}); } catch { other = {}; }
+  if (!other || typeof other !== 'object' || Array.isArray(other)) other = {};
   const reject = String(other.admin_info?.reject_reason || other.reject_reason || '');
   const special = Boolean(other.image_output || other.audio_output || other.reasoning_tokens || other.tool_surcharges?.length || /block|filter|abort|disconnect|cancel/i.test(reject));
   result.evidence = special ? 'special' : /gemini_empty_candidates|empty_response/.test(reject) ? 'empty_marked' : 'pending';
@@ -137,13 +138,18 @@ export function selfServiceDecision(log, user, rules, now = Date.now(), aiReview
   const reject=other.admin_info?.reject_reason||other.reject_reason;
   if(!rules.executionEnabled)reasons.push('返还执行暂未开放');
   if(rules.aiEnabled){
-    if(aiReview?.status!=='completed')reasons.push(aiReview?'AI 判定未成功完成，转人工审核':'等待 AI 判定');
+    const explanation=typeof aiReview?.reason==='string'?aiReview.reason.trim().slice(0,1000):'';
+    if(aiReview?.status!=='completed')reasons.push(aiReview?(explanation||'AI 本次没有完成自动审核，已转管理员审核。'):'等待 AI 读取消费记录并审核');
     else {
       const probability=aiReview.analysis?.emptyProbability;
       const decision=Number.isFinite(probability)?probability>=rules.aiAutoThreshold/100?'empty':probability<=1-rules.aiAutoThreshold/100?'not_empty':'uncertain':aiReview.decision;
-      if(decision==='not_empty')reasons.push('AI 判定更倾向于非空回，转人工审核');
-      else if(decision!=='empty')reasons.push('AI 判定为空回的概率未达到自动补偿阈值 '+rules.aiAutoThreshold+'%，转人工审核');
-      else if(!Number.isFinite(aiReview.confidence)||aiReview.confidence<rules.aiAutoThreshold/100)reasons.push('AI 置信度未达到当前自动通过阈值 '+rules.aiAutoThreshold+'%，转人工审核');
+      if(aiReview.analysis?.responseIssue==='invalid_probability')reasons.push(explanation||'AI 未返回有效空回概率，审核结果格式不正确，已转管理员审核。');
+      else if(decision!=='empty'){
+        const score=Number.isFinite(probability)?`AI 认为本次没有生成有效回答的可能性为 ${Math.trunc(probability*1_000_000)/10_000}%，未达到自动补偿标准 ${rules.aiAutoThreshold}%，已转管理员审核。`
+          :decision==='not_empty'?'AI 发现这条消费可能已有有效回答，需要管理员核对后决定是否补偿。':'AI 判定为空回的概率未达到自动补偿标准 '+rules.aiAutoThreshold+'%，已转管理员审核。';
+        reasons.push(score+(explanation?` 原因：${explanation}`:''));
+      }
+      else if(!Number.isFinite(aiReview.confidence)||aiReview.confidence<rules.aiAutoThreshold/100)reasons.push('AI 对空回的判断未达到当前自动补偿标准 '+rules.aiAutoThreshold+'%，已转管理员审核。'+(explanation?` 原因：${explanation}`:''));
     }
   }else{
     if(fundingSource(log)==='subscription')reasons.push('订阅消费须站长审批，批准并核验后补入钱包余额');

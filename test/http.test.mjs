@@ -6,9 +6,35 @@ import { Store } from '../src/store.mjs';
 import { createApplication } from '../src/server.mjs';
 import { mockServer, rules, user, admin, log } from './helpers.mjs';
 
-async function setup(t){const remote=await mockServer();const store=new Store();store.saveRules(rules(),1,1);const origin='http://127.0.0.1:3210';const {server}=createApplication({store,upstream:remote.upstream,origin});server.listen(0,'127.0.0.1');await once(server,'listening');const base='http://127.0.0.1:'+server.address().port;t.after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));store.close();await remote.close();});
+async function setup(t){const remote=await mockServer();const store=new Store();store.saveRules(rules(),1,1);const origin='http://127.0.0.1:3210';const {server,service,drain=async()=>{}}=createApplication({store,upstream:remote.upstream,origin});server.listen(0,'127.0.0.1');await once(server,'listening');const base='http://127.0.0.1:'+server.address().port;t.after(async()=>{server.closeAllConnections();await new Promise(r=>server.close(r));await drain();store.close();await remote.close();});
   const request=async(path,{method='GET',body,cookie,csrf,requestOrigin=origin}={})=>{const res=await fetch(base+path,{method,headers:{'Content-Type':'application/json',Origin:requestOrigin,...(cookie?{Cookie:cookie}:{}),...(csrf?{'X-CSRF-Token':csrf}:{})},body:body===undefined?undefined:JSON.stringify(body)});return {status:res.status,json:await res.json(),cookie:res.headers.get('set-cookie')};};
-  const login=async who=>{const out=await request('/api/auth/login',{method:'POST',body:{username:who.username,password:'fixture-password'}});assert.equal(out.status,200);return {cookie:out.cookie.split(';')[0],csrf:out.json.data.csrf};};return {remote,store,server,base,request,login};}
+  const login=async who=>{const out=await request('/api/auth/login',{method:'POST',body:{username:who.username,password:'fixture-password'}});assert.equal(out.status,200);return {cookie:out.cookie.split(';')[0],csrf:out.json.data.csrf};};return {remote,store,server,service,drain,base,request,login};}
+
+test('后台提交在模型完成前返回已持久化进度，重复提交只审一次且完成通知去重',async t=>{
+ const f=await setup(t),u=await f.login(user);
+ f.store.saveRules({...f.store.rules(),aiEnabled:true,notifications:{enabled:true,events:['batch_result']}},admin.id,f.store.rules().version);
+ const {AIReviewer}=await import('../src/ai-review.mjs');
+ const entered=Promise.withResolvers(),release=Promise.withResolvers();let calls=0,settled=false;
+ f.service.ai=new AIReviewer({store:f.store,env:{AI_BASE_URL:'http://ai.test/v1',AI_API_KEY:'fixture',AI_MODEL:'fixture'},fetcher:async()=>{
+  calls++;entered.resolve();await release.promise;settled=true;
+  return new Response(JSON.stringify({choices:[{message:{content:'{"empty_probability":0.98,"reason":"已经扣费，但没有生成有效回答"}'}}]}));
+ }});
+ const batch=(await f.request('/api/logs?refresh=1',u)).json.data.batches[0];
+ const pending=f.request('/api/batches/'+batch.id+'/submit',{...u,method:'POST',body:{background:true}});
+ try{
+  await entered.promise;
+  const accepted=await Promise.race([pending,new Promise(resolve=>setTimeout(()=>resolve(null),1000))]);
+  assert.ok(accepted,'模型尚未结束时应返回已接收结果，不能阻塞页面');
+  assert.equal(settled,false);assert.equal(accepted.status,202);assert.equal(accepted.json.data.status,'judging');
+  assert.equal(f.store.queryBatch(batch.id).status,'judging');assert.equal(f.store.batchClaims(batch.id).length,1);
+  const again=await f.request('/api/batches/'+batch.id+'/submit',{...u,method:'POST',body:{background:true}});
+  assert.equal(again.status,202);assert.equal(calls,1);assert.equal(f.remote.data.credits.length,0);
+  assert.equal((await f.request('/api/batches/'+batch.id,u)).json.data.status,'judging');
+ }finally{release.resolve();await pending;await f.drain();}
+ const result=(await f.request('/api/batches/'+batch.id,u)).json.data;
+ assert.equal(result.status,'succeeded');assert.equal(f.remote.data.credits.length,1);assert.equal(calls,1);
+ assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM notifications').get().n,1);
+});
 
 test('HTTP 秒级接续不重扫已覆盖时间，普通读取保留进度',async t=>{
  const f=await setup(t),u=await f.login(user);f.remote.data.logs=[];

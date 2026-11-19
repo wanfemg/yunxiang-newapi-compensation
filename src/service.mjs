@@ -12,12 +12,13 @@ export class Compensation {
   constructor(store, upstream, clock = Date.now, ai = {}) { this.store = store; this.upstream = upstream; this.locks = new Set(); this.logQueries = new LogQueries(store, upstream, clock); this.ai = ai.reviewer || new AIReviewer({ store, now: clock }); this.batches = new QueryBatches(this); }
   requireAdmin(user) { if (user.role < 10) throw new AppError('需要站长管理权限', 403); }
   async ruleContext(logs){
-    const rules=this.store.rules();
-    if(!this.upstream.catalog)return rules;
+    if(!this.upstream.catalog)return this.store.rules();
+    const pending=this.catalogInflight ||= Promise.resolve().then(()=>this.upstream.catalog());
     try{
-      const catalog=await this.upstream.catalog();
+      const catalog=await pending,rules=this.store.rules();
       return {...rules,retiredModelKeys:logs.filter(log=>!catalog.channels.some(c=>c.id===log.channel&&c.status===1&&c.models.includes(log.model_name))).map(log=>log.channel+':'+log.model_name)};
-    }catch{return {...rules,catalogUnavailable:true};}
+    }catch{return {...this.store.rules(),catalogUnavailable:true};}
+    finally{if(this.catalogInflight===pending)this.catalogInflight=null;}
   }
   claimFor(user, id) {
     const c = this.store.get(id);
@@ -193,13 +194,14 @@ export class Compensation {
     if (aiReview) {
       const probability=aiReview.analysis?.emptyProbability;
       this.store.event(claim.id,user.id,'ai_reviewed',{decision:aiReview.decision,confidence:aiReview.confidence,...(Number.isFinite(probability)?{emptyProbability:probability}:{}),reason:aiReview.reason,status:aiReview.status});
-      const score=Number.isFinite(probability)?`空回概率 ${Math.round(probability*100)}%`:`置信度 ${Math.round(Number(aiReview.confidence||0)*100)}%`;
-      this.store.notifyClaim('ai_reviewed',claim,`AI 判定：${aiReview.decision}，${score}。${aiReview.reason}`);
+      const score=aiReview.status==='completed'&&Number.isFinite(probability)?`空回概率 ${Math.trunc(probability*1_000_000)/10_000}%`:'';
+      const resultLabel=aiReview.status!=='completed'?'本次自动审核未完成':aiReview.decision==='empty'?'符合空回特征':aiReview.decision==='not_empty'?'需核对是否已有有效回答':'需要管理员进一步核对';
+      this.store.notifyClaim('ai_reviewed',claim,`AI 审核：${resultLabel}${score?`，${score}`:''}。${aiReview.reason}`);
     }
     this.store.event(claim.id,user.id,'self_service_routed',{route:decision.automatic?'automatic':'review',reasons:decision.reasons});
     if(!decision.automatic){
       if(aiReview) this.store.notifyClaim('ai_manual_review',claim,`未满足自动补偿条件，转管理员审核。${decision.reasons.join('；')}`);
-      return this.view(this.store.transition(claim.id,['pending'],'pending',user.id,'异常转审批：'+decision.reasons.join('；')));
+      return this.view(this.store.transition(claim.id,['pending'],'pending',user.id,(aiReview?'等待管理员审核：':'等待管理员审批：')+decision.reasons.join('；')));
     }
     try{
       if(prepared)this.store.db.prepare('UPDATE claims SET batch_auto=1 WHERE id=?').run(claim.id);

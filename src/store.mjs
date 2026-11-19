@@ -169,9 +169,12 @@ export class Store {
     return this.db.prepare('INSERT INTO events(claim_id,actor_id,action,detail,created_at) VALUES(?,?,?,?,?)').run(claimId, actor, action, JSON.stringify(detail), Date.now()).lastInsertRowid;
   }
   notifyUserClaim(claim,identity) {
-    const title={pending:'申请等待审核',approved:'申请审核通过',rejected:'申请审核未通过',succeeded:'额度补偿成功',failed:'额度补偿失败',unknown:'额度补偿待核对'}[claim.status];
+    const pendingBatch=claim.status==='pending'&&claim.batch_id?this.queryBatch(claim.batch_id):null;
+    const awaitingAutomatic=pendingBatch&&!claim.review_note&&['open','judging'].includes(pendingBatch.status);
+    const transferredToManual=pendingBatch?.status==='judging'&&Boolean(claim.review_note);
+    const title=awaitingAutomatic?'申请已保存，正在自动核验':transferredToManual?'申请转人工审核':{pending:'申请等待审核',approved:'申请审核通过',rejected:'申请审核未通过',succeeded:'额度补偿成功',failed:'额度补偿失败',unknown:'额度补偿待核对'}[claim.status];
     if(!title)return;
-    const note={pending:'申请已进入人工审核队列。',approved:'审核已通过，等待执行补偿。',rejected:'本次申请未通过审核。',succeeded:'原站已确认补偿成功。',failed:'本次补偿未成功，请查看申请处理说明。',unknown:'到账结果尚未确认，正在等待管理员核对，请勿重复提交。'}[claim.status];
+    const note=awaitingAutomatic?'申请已保存，正在自动核验。审核结果会继续更新，无需重复提交。':{pending:'申请已进入人工审核队列。',approved:'审核已通过，等待执行补偿。',rejected:'本次申请未通过审核。',succeeded:'原站已确认补偿成功。',failed:'本次补偿未成功，请查看申请处理说明。',unknown:'到账结果尚未确认，正在等待管理员核对，请勿重复提交。'}[claim.status];
     const body=String(claim.log.model_name||'未知模型')+' · '+(claim.review_note||note);
     this.db.prepare('INSERT OR IGNORE INTO user_notifications(user_id,claim_id,status,title,body,dedupe_key,created_at) VALUES(?,?,?,?,?,?,?)').run(claim.user_id,claim.id,claim.status,title,body.slice(0,2400),String(identity),claim.updated_at);
   }
@@ -448,7 +451,8 @@ export class Store {
       this.db.prepare('UPDATE claims SET status=?,operator_id=?,review_note=?,updated_at=? WHERE id=?').run(to, actor, note, Date.now(), id);
       const eventId=this.event(id, actor, to, { note, previousStatus: c.status });
       const updated=this.get(id);
-      if(c.status!==to)this.notifyUserClaim(updated,'event:'+eventId);
+      const firstAutomaticManualResult=c.batch_id&&c.status==='pending'&&to==='pending'&&!c.review_note&&String(note||'').trim();
+      if(c.status!==to||firstAutomaticManualResult)this.notifyUserClaim(updated,'event:'+eventId);
       if(!updated.run_id)this.notifyClaim(to === 'pending' ? 'application_pending' : to === 'succeeded' ? 'compensation_success' : to === 'unknown' ? 'execution_unknown' : to === 'failed' ? 'execution_failed' : 'review_result',updated,note);
       return this.get(id);
     });

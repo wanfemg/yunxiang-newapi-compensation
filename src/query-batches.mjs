@@ -5,13 +5,15 @@ import { UpstreamError } from './newapi.mjs';
 const sameLog=(a,b)=>['request_id','type','user_id','quota','created_at','model_name','channel','prompt_tokens','completion_tokens','group','other'].every(key=>JSON.stringify(a[key])===JSON.stringify(b[key]));
 async function mapLimit(items,limit,fn){
   let next=0;
-  await Promise.all(Array.from({length:Math.min(limit,items.length)},async()=>{
+  const results=await Promise.allSettled(Array.from({length:Math.min(limit,items.length)},async()=>{
     while(next<items.length){const index=next++;await fn(items[index],index);}
   }));
+  const failed=results.find(result=>result.status==='rejected');
+  if(failed)throw failed.reason;
 }
 
 export class QueryBatches {
-  constructor(service) { this.service=service; this.store=service.store; this.jobs=new Map(); }
+  constructor(service) { this.service=service; this.store=service.store; this.jobs=new Map(); this.submissions=new Map(); }
   require(user,id) {
     const batch=this.store.queryBatch(id);
     if(!batch||(user.role<10&&batch.user_id!==user.id))throw new AppError('补偿批次不存在',404);
@@ -38,20 +40,32 @@ export class QueryBatches {
     this.jobs.set(id,job);return job;
   }
   async submit(user,id,reason='申请按查询批次核验空回补偿') {
-    this.require(user,id);
+    return this.submission(user,id,reason).completion;
+  }
+  async submitBackground(user,id,reason='申请按查询批次核验空回补偿') {
+    const task=this.submission(user,id,reason);
+    return {batch:await task.accepted,completion:task.completion};
+  }
+  submission(user,id,reason) {
+    const owned=this.require(user,id);
+    if(owned.user_id!==user.id)throw new AppError('只能提交本人的查询批次',403);
     if(typeof reason!=='string'||!reason.trim()||reason.length>2000)throw new AppError('补偿说明无效');
-    return this.run(id,async()=>{
+    if(this.submissions.has(id))return this.submissions.get(id);
+    if(this.jobs.has(id))return {accepted:this.view(user,id),completion:this.jobs.get(id)};
+    const {promise:accepted,resolve:accept,reject}=Promise.withResolvers();
+    accepted.catch(()=>{});
+    const completion=this.run(id,async()=>{
       const batch=this.require(user,id);
-      if(batch.user_id!==user.id)throw new AppError('只能提交本人的查询批次',403);
-      if(batch.status!=='open')return this.view(user,id);
+      if(batch.status!=='open'){const result=await this.view(user,id);accept(result);return result;}
       const rules=await this.service.ruleContext(batch.logs);
       if(!rules.applicationsEnabled||!isOpen(rules,Date.now()))throw new AppError('申请暂未开放');
       const logs=batch.logs.filter(log=>log.request_id&&!this.store.byRequest(log.request_id)&&assessLog(log,user,rules).eligible);
-      if(!logs.length){this.store.updateBatch(id,'rejected','本次查询没有可补偿的记录');return this.view(user,id);}
+      if(!logs.length){this.store.updateBatch(id,'rejected','本次查询没有可补偿的记录');const result=await this.view(user,id);accept(result);return result;}
       const counts=new Map();
       for(const log of batch.logs)if(log.request_id)counts.set(log.request_id,(counts.get(log.request_id)||0)+1);
       if(logs.some(log=>counts.get(log.request_id)!==1))throw new AppError('存在重复原请求标识，禁止关联补偿，请管理员核实',409);
       this.store.enrollBatch(id,logs,user,rules,reason.trim(),user.id);
+      accept(await this.view(user,id));
       const claims=this.store.batchClaims(id);
       await mapLimit(claims,4,async claim=>{
         try{
@@ -67,7 +81,16 @@ export class QueryBatches {
       });
       await this.finishJudging(user,id);
       return this.view(user,id);
+    }).catch(error=>{
+      reject(error);
+      if(this.store.queryBatch(id)?.status==='judging')this.store.updateBatch(id,'review','自动审核暂时中断，申请已保留并转管理员继续处理，无需重复提交');
+      throw error;
     });
+    const task={accepted,completion};
+    this.submissions.set(id,task);
+    const cleanup=()=>{if(this.submissions.get(id)===task)this.submissions.delete(id);};
+    completion.then(cleanup,cleanup);
+    return task;
   }
   async stage(user,claim,amount,note) {
     this.service.requireAdmin(user);positiveInt(amount,'核实尚未返还额度');
@@ -99,12 +122,12 @@ export class QueryBatches {
     try{
       const target=await this.service.upstream.target(batch.user_id);
       if(target?.id!==batch.user_id||target.status!==1)throw new AppError('原消费账号状态异常');
-      const originals=[];
-      for(const claim of approved){
+      const originals=new Array(approved.length);
+      await mapLimit(approved,4,async(claim,index)=>{
         const original=await this.service.upstream.log(claim.request_id);
         if(!sameLog(original,claim.log))throw new AppError('原消费发生变化，须重新审核：'+claim.request_id);
-        originals.push(original);
-      }
+        originals[index]=original;
+      });
       const rules=await this.service.ruleContext(originals);
       if(!rules.executionEnabled)throw new AppError('补偿执行暂未开放');
       for(let i=0;i<approved.length;i++){
