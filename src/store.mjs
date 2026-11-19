@@ -600,8 +600,13 @@ export class Store {
   }
   refundRecords(userId, page = 1) {
     const total=this.db.prepare("SELECT COUNT(DISTINCT COALESCE(run_id,id)) AS n FROM claims WHERE user_id=? AND status='succeeded'").get(userId).n;
-    const groups=this.db.prepare("SELECT COALESCE(run_id,id) AS id, MAX(updated_at) AS completedAt, MIN(created_at) AS createdAt FROM claims WHERE user_id=? AND status='succeeded' GROUP BY COALESCE(run_id,id) ORDER BY completedAt DESC,id DESC LIMIT 30 OFFSET ?").all(userId,(page-1)*30);
-    return {total,page,timezone:this.rules().timezone,items:groups.map(group=>({...group,claims:this.db.prepare("SELECT * FROM claims WHERE user_id=? AND COALESCE(run_id,id)=? AND status='succeeded' ORDER BY json_extract(log,'$.created_at') DESC,id").all(userId,group.id).map(row=>this.decode(row))}))};
+    const groups=this.db.prepare(`SELECT COALESCE(c.run_id,c.id) AS id, MAX(c.updated_at) AS completedAt, MIN(c.created_at) AS createdAt,
+      CASE WHEN COUNT(b.id)=COUNT(*) AND COUNT(DISTINCT b.id)=1 THEN MIN(b.query_from) END AS queryFrom,
+      CASE WHEN COUNT(b.id)=COUNT(*) AND COUNT(DISTINCT b.id)=1 THEN MAX(b.query_end) END AS queryEnd
+      FROM claims c LEFT JOIN compensation_batches b ON b.id=c.batch_id AND b.user_id=c.user_id
+      WHERE c.user_id=? AND c.status='succeeded' GROUP BY COALESCE(c.run_id,c.id)
+      ORDER BY createdAt DESC,MIN(c.rowid) DESC LIMIT 30 OFFSET ?`).all(userId,(page-1)*30);
+    return {total,page,timezone:this.rules().timezone,items:groups.map(({queryFrom,queryEnd,...group})=>({...group,queryRange:queryFrom===null||queryEnd===null?null:{from:queryFrom,end:queryEnd},claims:this.db.prepare("SELECT * FROM claims WHERE user_id=? AND COALESCE(run_id,id)=? AND status='succeeded' ORDER BY json_extract(log,'$.created_at') DESC,id").all(userId,group.id).map(row=>this.decode(row))}))};
   }
   stats(kind = 'users') {
     const key = { users: 'CAST(user_id AS TEXT)', models: "json_extract(log,'$.model_name')", channels: "CAST(json_extract(log,'$.channel') AS TEXT)", days: 'execution_day' }[kind];

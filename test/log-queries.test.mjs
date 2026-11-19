@@ -89,14 +89,14 @@ test('窗口收窄跳过过期时间，进度不随缓存过期',async t=>{
   f.advance(4*86400000);await scanner.read(user,{refresh:true},24);assert.equal(f.calls[1].start,Math.floor(f.clock()/1000)-86400);
   f.store.db.exec('DELETE FROM log_query_cache');f.advance(1000);await scanner.read(user,{refresh:true},24);assert.equal(f.calls[2].start,Math.floor(f.clock()/1000));
 });
-test('扩大窗口只补新增左侧缺口及新尾段，不重复已覆盖时间',async t=>{
+test('扩大管理员时间窗口仍只接续上次截止，旧时段不回扫也不显示为待查缺口',async t=>{
   const f=setup(t);const scanner=new LogQueries(f.store,f.upstream,f.clock),first=await scanner.read(user,{},24);
   f.advance(10000);const current=Math.floor(f.clock()/1000),oldStart=first.window.start;
   const cached=await scanner.read(user,{},48);assert.equal(f.calls.length,1);
-  assert.deepEqual(cached.gaps,[{start:current-172800,end:oldStart-1},{start:first.end+1,end:current}]);
+  assert.deepEqual(cached.gaps,[{start:first.end+1,end:current}]);
   const out=await scanner.read(user,{refresh:true},48);
-  assert.deepEqual(f.calls.slice(1).map(q=>({start:q.start,end:q.end})),[{start:current-172800,end:oldStart-1},{start:first.end+1,end:current}]);
-  assert.deepEqual(out.coverage,[{start:current-172800,end:current}]);assert.deepEqual(out.gaps,[]);assert.equal(out.coverageStart,current-172800);
+  assert.deepEqual(f.calls.slice(1).map(q=>({start:q.start,end:q.end})),[{start:first.end+1,end:current}]);
+  assert.deepEqual(out.coverage,[{start:oldStart,end:current}]);assert.deepEqual(out.gaps,[]);assert.equal(out.coverageStart,oldStart);
 });
 test('管理员定向补查发现迟到日志，展示行号变化不重复入批且不推进普通游标',async t=>{
   const f=setup(t,[log('old')]),scanner=new LogQueries(f.store,f.upstream,f.clock),first=await scanner.read(user,{},72);
@@ -125,14 +125,40 @@ test('定向补查严格限制管理员范围并隔离用户，初次补查不�
   const complete=await scanner.read(user,{},72,bounds);
   assert.equal(complete.end,end-1);assert.deepEqual(complete.gaps,[]);
 });
-test('扩大窗口多个缺口中途失败，覆盖范围和批次一起保持原状',async t=>{
+test('规则扩大后尾段查询失败，覆盖范围和批次保持原状，重试仍接续原截止',async t=>{
   const f=setup(t),scanner=new LogQueries(f.store,f.upstream,f.clock),first=await scanner.read(user,{},24),before=f.store.logQueryProgress(user.id);
   f.advance(10000);const original=f.upstream.logs;
   f.upstream.logs=async q=>{if(q.start>first.end)throw Error('tail unavailable');return original(q);};
   await assert.rejects(scanner.read(user,{refresh:true},48),/tail unavailable/);
   assert.deepEqual(f.store.logQueryProgress(user.id),before);
   f.upstream.logs=original;const restored=await scanner.read(user,{refresh:true},48);
-  assert.deepEqual(restored.gaps,[]);assert.equal(restored.end,Math.floor(f.clock()/1000));
+  assert.deepEqual(restored.gaps,[]);assert.equal(restored.end,Math.floor(f.clock()/1000));assert.equal(f.calls.at(-1).start,first.end+1);
+});
+
+test('缺失查询进度的历史成功补偿从原批次截止恢复，忽略其他账号和无成功证据的批次',async t=>{
+  const f=setup(t),end=Math.floor(f.clock()/1000),previousEnd=end-3600,previousStart=end-7200;
+  const source=log('legacy-paid',{created_at:previousStart+60});
+  f.store.insertQueryBatch({id:'legacy-paid-batch',user,from:previousStart,end:previousEnd,items:[source]});
+  f.store.enrollBatch('legacy-paid-batch',[source],user,f.store.rules(),'历史补偿',user.id);
+  f.store.db.prepare("UPDATE claims SET status='succeeded',amount=120 WHERE batch_id=?").run('legacy-paid-batch');
+  const foreignUser={...user,id:8},foreign=log('foreign-paid',{user_id:8,created_at:end-10});
+  f.store.insertQueryBatch({id:'foreign-paid-batch',user:foreignUser,from:end-20,end:end-5,items:[foreign]});
+  f.store.enrollBatch('foreign-paid-batch',[foreign],foreignUser,f.store.rules(),'其他账号',foreignUser.id);
+  f.store.db.prepare("UPDATE claims SET status='succeeded',amount=120 WHERE batch_id=?").run('foreign-paid-batch');
+  f.store.insertQueryBatch({id:'unsubmitted-later',user,from:end-100,end:end-1,items:[log('unsubmitted',{created_at:end-50})]});
+  const scanner=new LogQueries(f.store,f.upstream,f.clock),cached=await scanner.read(user,{},48);
+  assert.equal(f.calls.length,0);assert.equal(cached.end,previousEnd);
+  assert.ok(cached.items.some(row=>row.request_id==='legacy-paid'));
+  const out=await scanner.read(user,{refresh:true},48);
+  assert.equal(f.calls[0].start,previousEnd+1);assert.equal(f.calls[0].end,end);
+  assert.equal(out.from,previousEnd+1);assert.equal(f.store.logQueryProgress(user.id).end,end);
+});
+
+test('只有未提交批次且无查询进度的账号仍按管理员允许窗口首次查询',async t=>{
+  const f=setup(t),end=Math.floor(f.clock()/1000);
+  f.store.insertQueryBatch({id:'unpaid-only',user,from:end-7200,end:end-3600,items:[log('unpaid',{created_at:end-4000})]});
+  await new LogQueries(f.store,f.upstream,f.clock).read(user,{refresh:true},48);
+  assert.equal(f.calls[0].start,end-48*3600);assert.equal(f.calls[0].end,end);
 });
 test('清理查询payload后从已保存批次恢复，窗口再次扩大不丢未提交日志',async t=>{
   const f=setup(t),now=Math.floor(f.clock()/1000);

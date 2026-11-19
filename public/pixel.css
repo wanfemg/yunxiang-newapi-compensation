@@ -1893,6 +1893,11 @@ html,body{color-scheme:light!important;background:var(--px-paper)!important;colo
 .query-batch .batch-limit{margin:12px 0;overflow-wrap:anywhere;line-height:1.8}
 .query-batch footer{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .query-batch footer .field-help{flex:1 1 240px}
+.batch-query-range{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px 20px;margin:10px 0 14px;font-size:14px;line-height:1.8}
+.query-time-range{display:inline-flex;align-items:baseline;justify-content:flex-end;flex-wrap:wrap;gap:0 8px;max-width:100%;font-variant-numeric:tabular-nums}
+.query-time-range time{white-space:nowrap}
+.query-time-separator{color:var(--muted);font-size:12px}
+@media(max-width:700px){.query-time-range{display:inline-grid;grid-template-columns:minmax(0,1fr);justify-items:end;row-gap:2px}.query-time-separator{line-height:1.2}.batch-query-range .query-time-range{justify-items:start}.batch-query-range{display:grid;grid-template-columns:minmax(0,1fr);gap:4px}}
 .query-backfill form{margin:0}
 .query-backfill input{max-width:100%;min-width:0}
 .query-backfill [data-form-feedback]:empty{display:none}

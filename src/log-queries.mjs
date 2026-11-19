@@ -64,9 +64,21 @@ export class LogQueries {
   coverage(snapshot) {
     return mergeRanges(snapshot?.coverage||(Number.isSafeInteger(snapshot?.end)?[{start:snapshot.coverageStart??snapshot.from,end:snapshot.end}]:[]));
   }
+  progress(user,start,end) {
+    const saved=this.store.logQueryProgress(user.id);
+    if(saved)return saved;
+    // Paid query batches preserve a usable cutoff when an old installation has no progress row.
+    const batch=this.store.db.prepare(`SELECT b.query_from AS start,b.query_end AS end,b.created_at AS syncedAt
+      FROM compensation_batches b WHERE b.user_id=? AND EXISTS(
+        SELECT 1 FROM claims c WHERE c.batch_id=b.id AND c.user_id=b.user_id AND c.status='succeeded')
+      ORDER BY b.query_end DESC,b.created_at DESC,b.rowid DESC LIMIT 1`).get(user.id);
+    if(!batch)return null;
+    return {items:this.store.logQueryRows(user.id,start,end),from:batch.start,end:batch.end,syncedAt:batch.syncedAt,coverageStart:batch.start,coverage:[{start:batch.start,end:batch.end}],window:{start,end}};
+  }
   visible(snapshot,user,start,end) {
     const coverage=this.coverage(snapshot);
-    return {...snapshot,window:{start,end},coverage:coverage.map(range=>({start:Math.max(start,range.start),end:Math.min(end,range.end)})).filter(range=>range.start<=range.end),gaps:gapsIn(start,end,coverage),items:snapshot.items.filter(log=>log.user_id===user.id&&log.created_at>=start&&log.created_at<=end)};
+    const from=Number.isSafeInteger(snapshot?.end)?Math.max(start,snapshot.end+1):start;
+    return {...snapshot,window:{start,end},coverage:coverage.map(range=>({start:Math.max(start,range.start),end:Math.min(end,range.end)})).filter(range=>range.start<=range.end),gaps:gapsIn(from,end,coverage),items:snapshot.items.filter(log=>log.user_id===user.id&&log.created_at>=start&&log.created_at<=end)};
   }
   mergeRows(user,start,end,previous,fetched,batchId) {
     const saved=new Map();
@@ -85,10 +97,11 @@ export class LogQueries {
     return {items:[...rows.values()].sort((a,b)=>b.created_at-a.created_at||Number(b.id||0)-Number(a.id||0)),added};
   }
   async sync(user, query, start, end, now) {
-    const previous = this.store.logQueryProgress(user.id);
+    const previous = this.progress(user,start,end);
     const coverage=this.coverage(previous);
-    const gaps=gapsIn(start,end,coverage);
     const hasCheckpoint=Number.isSafeInteger(previous?.end);
+    const scanStart=hasCheckpoint?Math.max(start,previous.end+1):start;
+    const gaps=gapsIn(scanStart,end,coverage);
     if(hasCheckpoint&&(!query.refresh||(!gaps.length&&end<=previous.end))){
       const previousStart=previous.window?.start??previous.coverageStart??start;
       const items=start<previousStart?this.mergeRows(user,start,end,previous,[],null).items:previous.items;

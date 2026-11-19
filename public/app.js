@@ -6,7 +6,7 @@ import {notificationCenter,emailPreview} from './notification-center.js';
 import {watchUIVersion} from './ui-version.js';
 import {userInbox} from './user-inbox.js';
 import {renderAuditLog} from './audit-log.js';
-import {renderQueryBatch,batchStatus} from './query-batches.js';
+import {renderQueryBatch,renderQueryRange,batchStatus} from './query-batches.js';
 import {aiDecisionForThreshold,aiResultLabel,formatAIProbability} from './ai-result.js';
 import {renderAmountPanel,bindAmountPanel} from './amount-panel.js';
 import {renderLimitNotice,limitMessage} from './limit-status.js';
@@ -144,17 +144,16 @@ function help(){
 }
 function filterInput(name,label,type='text'){return '<label>'+label+'<input name="'+name+'" type="'+type+'" value="'+esc(filters[name])+'"></label>';}
 function refundRecordsMarkup(data){
-  const format=t=>new Intl.DateTimeFormat('zh-CN',{timeZone:data.timezone,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(t);
+  const format=t=>new Intl.DateTimeFormat('zh-CN',{timeZone:data.timezone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(t);
   const records=data.items.map(record=>{
     const items=record.claims,amount=items.reduce((sum,c)=>sum+c.amount,0),models=new Set(items.map(c=>c.log.model_name)),days=new Map();
-    const times=items.map(c=>c.log.created_at*1000).filter(Number.isFinite);
     for(const c of items){const day=new Intl.DateTimeFormat('sv-SE',{timeZone:data.timezone}).format(c.log.created_at*1000);if(!days.has(day))days.set(day,[]);days.get(day).push(c);}
     const breakdown=[...days].sort(([a],[b])=>b.localeCompare(a)).map(([day,claims])=>{
       const byModel=new Map();for(const c of claims){if(!byModel.has(c.log.model_name))byModel.set(c.log.model_name,{count:0,amount:0});const v=byModel.get(c.log.model_name);v.count++;v.amount+=c.amount;}
       return '<div class="refund-day"><div class="refund-day-total"><strong>'+esc(day.slice(5).replace('-','/'))+'</strong><span>'+money(claims.reduce((sum,c)=>sum+c.amount,0))+' · '+claims.length+' 条消费</span></div><div class="history-models">'+[...byModel].map(([name,v])=>'<div><span>'+esc(name)+'</span><strong>'+money(v.amount)+' ('+v.count+' 条)</strong></div>').join('')+'</div></div>';
     }).join('');
     const labels=[...new Set(items.map(compensationLabel))];
-    return '<details class="history-group refund-record"><summary aria-label="展开空回补偿记录"><span class="refund-record-top"><span class="amount">空回补偿 · 成功</span>'+icon('chevron-right')+'</span><span class="record-fields"><span>补偿类型</span><strong>'+esc(labels.join('、'))+'</strong><span>时间范围</span><strong>'+esc(times.length?format(Math.min(...times)).slice(0,-3)+' ~ '+format(Math.max(...times)).slice(0,-3):'未记录')+'</strong><span>补回额度</span><strong class="amount">'+money(amount)+'</strong><span>模型数量</span><strong>'+models.size+'</strong><span>创建时间</span><strong>'+esc(format(record.createdAt))+'</strong></span></summary><div class="record-breakdown">'+breakdown+'<div class="history-items">'+items.map(c=>'<div class="history-item"><span class="request-id">'+esc(c.request_id)+'</span><span class="sub">'+esc(compensationLabel(c))+'</span><button class="ghost" data-detail="'+esc(c.id)+'">查看详情</button></div>').join('')+'</div></div></details>';
+    return '<details class="history-group refund-record"><summary aria-label="展开空回补偿记录"><span class="refund-record-top"><span class="amount">空回补偿 · 成功</span>'+icon('chevron-right')+'</span><span class="record-fields"><span>补偿类型</span><strong>'+esc(labels.join('、'))+'</strong><span>查询时间范围</span><strong>'+renderQueryRange(record.queryRange,{timeZone:data.timezone})+'</strong><span>补回额度</span><strong class="amount">'+money(amount)+'</strong><span>模型数量</span><strong>'+models.size+'</strong><span>创建时间</span><strong>'+esc(format(record.createdAt))+'</strong></span></summary><div class="record-breakdown">'+breakdown+'<div class="history-items">'+items.map(c=>'<div class="history-item"><span class="request-id">'+esc(c.request_id)+'</span><span class="sub">'+esc(compensationLabel(c))+'</span><button class="ghost" data-detail="'+esc(c.id)+'">查看详情</button></div>').join('')+'</div></div></details>';
   }).join('');
   return '<section class="refund-history"><div class="refund-history-heading"><h3>补回记录</h3><span>'+num(data.total)+' 条记录</span></div>'+ (records||empty('暂无补回记录'))+(s.page==='logs'&&data.total>data.items.length?'<button class="ghost" data-nav="records">查看全部记录</button>':'')+'</section>';
 }
@@ -164,7 +163,7 @@ function skippedModelsMarkup(data){
   if(!data.skippedModels?.length)return '';
   return '<section class="skipped-models" aria-label="已跳过的模型"><div class="refund-history-heading"><h3>已跳过的模型</h3><span>'+num(data.skippedCount)+' 笔记录</span></div><ul>'+data.skippedModels.map(entry=>'<li><strong>'+esc(entry.model)+'</strong><span>'+num(entry.count)+' 笔 · '+esc(entry.reason)+'</span></li>').join('')+'</ul></section>';
 }
-async function refundLanding(){const owner=s.user,page=s.page,[meta,batches]=await Promise.all([refundMeta(),api('/api/batches')]);if(s.user!==owner||s.page!==page)return;currentLogs=[];selectedLogs.clear();$('#content').innerHTML=refundHeader(meta.overview)+batches.map(batch=>renderQueryBatch(batch,{money,date})).join('')+refundRecordsMarkup(meta.records);for(const batch of batches)if(batchInProgress(batch))watchBatch(batch.id);icons();}
+async function refundLanding(){const owner=s.user,page=s.page,[meta,batches]=await Promise.all([refundMeta(),api('/api/batches')]);if(s.user!==owner||s.page!==page)return;currentLogs=[];selectedLogs.clear();$('#content').innerHTML=refundHeader(meta.overview)+batches.map(batch=>renderQueryBatch(batch,{money,date,timeZone:meta.records.timezone})).join('')+refundRecordsMarkup(meta.records);for(const batch of batches)if(batchInProgress(batch))watchBatch(batch.id);icons();}
 function queryProgressMarkup(progress){
   if(!progress)return '';
   const window=progress.window,coverage=progress.coverage||[],gaps=progress.gaps||[];
@@ -184,7 +183,7 @@ async function logs({refresh=false}={}){
   if(s.user!==owner||s.page!==page)return;selectedLogs.clear();currentLogs=data.items;
   const meta=await refundMeta();if(s.user!==owner||s.page!==page)return;
   const progress=data.queryProgress;
-  $('#content').innerHTML=refundHeader(meta.overview,true)+'<section class="refund-candidates"><div class="refund-history-heading"><h3>按查询补偿</h3><span>审核通过部分先补，其余转人工处理</span></div>'+(data.batches?.length?data.batches.map(batch=>renderQueryBatch(batch,{money,date})).join(''):empty('暂无待处理的补偿批次'))+queryProgressMarkup(progress)+'</section>'+skippedModelsMarkup(data)+refundRecordsMarkup(meta.records);
+  $('#content').innerHTML=refundHeader(meta.overview,true)+'<section class="refund-candidates"><div class="refund-history-heading"><h3>按查询补偿</h3><span>审核通过部分先补，其余转人工处理</span></div>'+(data.batches?.length?data.batches.map(batch=>renderQueryBatch(batch,{money,date,timeZone:meta.records.timezone})).join(''):empty('暂无待处理的补偿批次'))+queryProgressMarkup(progress)+'</section>'+skippedModelsMarkup(data)+refundRecordsMarkup(meta.records);
   for(const batch of data.batches||[])if(batchInProgress(batch))watchBatch(batch.id);
   icons();return;
 }
@@ -432,7 +431,7 @@ async function submitOperation(form){
 }
 async function openQueryBatch(id){
   const batch=await api('/api/batches/'+id);
-  showOperation(batch.status==='open'?'确认整批补偿':'查询批次处理进度',renderQueryBatch(batch,{money,date,result:true})+(batch.status==='open'?operationNote('补充说明（选填）',false):''),{kind:'queryBatch',id});
+  showOperation(batch.status==='open'?'确认整批补偿':'查询批次处理进度',renderQueryBatch(batch,{money,date,result:true,timeZone:s.rules?.timezone})+(batch.status==='open'?operationNote('补充说明（选填）',false):''),{kind:'queryBatch',id});
   $('#operation-submit').textContent='确认整批核验';
   $('#operation-submit').hidden=batch.status!=='open'||Boolean(batch.submissionLimit);
   if(batchInProgress(batch)){paintBatchProgress(batch);watchBatch(id);}
@@ -444,7 +443,7 @@ function paintBatchProgress(batch){
   $('#operation-submit').hidden=true;
   $('#operation-form .dialog-footer [data-close-operation]').textContent=running?'后台处理，关闭窗口':'完成';
   body.hidden=!running;
-  if(!running){$('#operation-results').innerHTML=renderQueryBatch(batch,{money,date,result:true});icons();return;}
+  if(!running){$('#operation-results').innerHTML=renderQueryBatch(batch,{money,date,result:true,timeZone:s.rules?.timezone});icons();return;}
   updateLoading(body,(batch.status==='executing'?'正在确认补偿到账':s.rules?.aiEnabled?'正在进行 AI 审查':'正在核验消费')+' · 已处理 '+batch.judged+' / '+batch.records+' 条');
   if(!body.querySelector('.batch-progress'))body.insertAdjacentHTML('beforeend','<progress class="batch-progress" aria-label="整批审查进度"></progress><p class="batch-progress-note" role="status"></p>');
   const progress=body.querySelector('.batch-progress');progress.max=Math.max(1,batch.records);progress.value=batch.judged;
