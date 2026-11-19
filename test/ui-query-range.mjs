@@ -60,8 +60,48 @@ try{
   }
   await page.setViewportSize({width:390,height:844});
   await page.screenshot({path:'output/playwright/query-range-mobile.png',animations:'disabled'});
+  await page.setViewportSize({width:1280,height:900});
+  await page.locator('#query-empty').click();
+  const progress=page.locator('.query-progress');
+  await progress.getByText('已保存的查询结果',{exact:true}).waitFor();
+  assert.equal(await progress.locator('.query-progress-count').count(),0,'cached results do not claim newly added records');
+  service.logQueries.clock=()=>(now+1)*1000;
+  await page.locator('#query-empty').click();
+  await progress.getByText('查询完成',{exact:true}).waitFor();
+  assert.match(await progress.locator('.query-progress-count').innerText(),/0 条新增消费/);
+  remote.data.logs.push(log('range-new',{id:922,created_at:now+2}));
+  service.logQueries.clock=()=>(now+3)*1000;
+  await page.locator('#query-empty').click();
+  await page.waitForFunction(()=>document.querySelector('.query-progress-count b')?.textContent==='1');
+  assert.equal(await progress.locator('.query-progress-cutoff time').innerText(),format(now+3));
+  assert.equal(await progress.locator('details').evaluate(node=>node.open),false,'coverage details start collapsed');
+  assert.equal(await progress.evaluate(node=>[node,...node.querySelectorAll('*')].some(item=>getComputedStyle(item).backgroundImage!=='none')),false,'query text never receives progress-bar stripes');
+  const contrast=await progress.locator('.query-progress-note').evaluate(node=>{
+    const rgb=value=>value.match(/[\d.]+/g).slice(0,3).map(Number);
+    const light=values=>values.map(value=>{const n=value/255;return n<=0.04045?n/12.92:((n+0.055)/1.055)**2.4;}).reduce((sum,value,index)=>sum+value*[0.2126,0.7152,0.0722][index],0);
+    let parent=node;
+    while(getComputedStyle(parent).backgroundColor==='rgba(0, 0, 0, 0)')parent=parent.parentElement;
+    const text=light(rgb(getComputedStyle(node).color)),background=light(rgb(getComputedStyle(parent).backgroundColor));
+    return (Math.max(text,background)+0.05)/(Math.min(text,background)+0.05);
+  });
+  assert.ok(contrast>=4.5,'readable query status text contrast');
+  await progress.locator('summary').focus();
+  await progress.locator('summary').press('Enter');
+  assert.equal(await progress.locator('details').evaluate(node=>node.open),true,'keyboard opens query details');
+  await progress.locator('summary').evaluate(node=>node.blur());
+  await page.mouse.move(0,0);
+  await progress.screenshot({path:'output/playwright/query-progress-desktop.png',animations:'disabled'});
+  for(const width of [390,320]){
+    await page.setViewportSize({width,height:844});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'query details fit '+width+'px');
+  }
+  await page.setViewportSize({width:390,height:844});
+  await progress.locator('summary').click();
+  await progress.locator('summary').evaluate(node=>node.blur());
+  await page.mouse.move(0,0);
+  await progress.screenshot({path:'output/playwright/query-progress-mobile.png',animations:'disabled'});
   assert.deepEqual(errors,[]);
-  console.log('PASS query ranges: actual incremental bounds, full second precision, site timezone, cards/history/dialog, desktop/390px/320px');
+  console.log('PASS query ranges and readable status: full second precision, site timezone, saved/zero/new results, stripe-free text, contrast, keyboard details, desktop/390px/320px');
 }finally{
   await browser.close();
   await fixture.drain();

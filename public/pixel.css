@@ -1286,11 +1286,11 @@ dialog::backdrop{
    加载 / 进度
    ================================================================ */
 .spinner,button.is-loading:after{border-radius:0!important}
-.query-progress,.batch-progress{
+.batch-progress{
   background:var(--px-card)!important;
   box-shadow:inset 0 0 0 3px var(--px-ink)!important;overflow:hidden
 }
-.query-progress>*,.batch-progress>*{
+.batch-progress>*{
   background:var(--px-green-d) repeating-linear-gradient(
     45deg,transparent 0 6px,rgba(38,62,54,.18) 6px 12px
   )!important
@@ -1893,6 +1893,32 @@ html,body{color-scheme:light!important;background:var(--px-paper)!important;colo
 .query-batch .batch-limit{margin:12px 0;overflow-wrap:anywhere;line-height:1.8}
 .query-batch footer{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .query-batch footer .field-help{flex:1 1 240px}
+.query-progress{display:block;margin-top:24px;padding:24px 0 0;border-top:1px solid var(--line);background:transparent;box-shadow:none;overflow:visible;color:var(--ink);font-size:14px;line-height:1.7}
+.query-progress span,.query-progress p{color:inherit}
+.query-progress-heading{display:flex;align-items:center;flex-wrap:wrap;gap:10px 12px}
+.query-progress-heading>strong{font-size:16px;font-weight:750}
+.query-progress .query-progress-icon{display:grid;place-items:center;flex:0 0 32px;width:32px;height:32px;background:var(--px-mint);color:var(--ink);border-radius:6px}
+.query-progress-icon svg{width:19px;height:19px}
+.query-progress .query-progress-count{margin-left:auto;font-size:13px;white-space:nowrap}
+.query-progress-count b{font-size:18px;font-weight:750;font-variant-numeric:tabular-nums;margin-right:3px}
+.query-progress .query-progress-cutoff{display:flex;align-items:baseline;flex-wrap:wrap;gap:2px 12px;margin:14px 0 6px}
+.query-progress-cutoff time{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+.query-progress .query-progress-note{margin:0;font-size:13px;line-height:1.8}
+.query-progress-details{margin-top:18px;border-top:1px solid var(--px-paper-2)}
+.query-progress-details>summary{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;padding:14px 0;line-height:1.6;font-size:13px;font-weight:600;color:var(--ink)}
+.query-progress-details>summary::before{display:none}
+.query-progress-details>summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.query-progress-details>summary:hover{color:var(--accent)}
+.query-progress .query-progress-coverage{margin-left:auto;font-size:12px;font-weight:400}
+.query-progress-details>summary svg{flex:0 0 16px;width:16px;height:16px;transition:transform .15s}
+.query-progress-details[open]>summary svg{transform:rotate(180deg)}
+.query-progress-details-body{padding:2px 0 14px;font-size:13px}
+.query-progress-window,.query-progress-intervals li{display:grid;grid-template-columns:120px minmax(0,1fr);align-items:baseline;gap:6px 16px}
+.query-progress-window>.query-time-range,.query-progress-intervals .query-time-range{justify-content:flex-start}
+.query-progress-intervals{list-style:none;margin:14px 0;padding:0}
+.query-progress-intervals li{padding:10px 0;border-top:1px solid var(--px-paper-2)}
+.query-progress-details-body>p{margin:10px 0 0;line-height:1.8}
+@media(max-width:700px){.query-progress{padding-top:20px}.query-progress-heading{gap:8px}.query-progress-heading>strong{font-size:15px}.query-progress-count b{font-size:16px}.query-progress .query-progress-cutoff{display:grid;gap:3px}.query-progress .query-progress-coverage{margin-left:0}.query-progress-details>summary>svg{margin-left:auto}.query-progress-window,.query-progress-intervals li{grid-template-columns:minmax(0,1fr);gap:4px}.query-progress-window>.query-time-range,.query-progress-intervals .query-time-range{justify-items:start}}
 .batch-query-range{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px 20px;margin:10px 0 14px;font-size:14px;line-height:1.8}
 .query-time-range{display:inline-flex;align-items:baseline;justify-content:flex-end;flex-wrap:wrap;gap:0 8px;max-width:100%;font-variant-numeric:tabular-nums}
 .query-time-range time{white-space:nowrap}

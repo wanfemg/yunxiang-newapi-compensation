@@ -167,11 +167,16 @@ async function refundLanding(){const owner=s.user,page=s.page,[meta,batches]=awa
 function queryProgressMarkup(progress){
   if(!progress)return '';
   const window=progress.window,coverage=progress.coverage||[],gaps=progress.gaps||[];
-  const title=progress.end?'已成功查询至 '+date(progress.end*1000):'尚未完成首次查询';
-  const range=window?'<span>当前可补范围：'+esc(date(window.start*1000))+' 至 '+esc(date(window.end*1000))+'</span>':'';
-  const pending=gaps.length?'<p>还有 '+num(gaps.length)+' 段未覆盖时间，继续查询时将完整读取后保存进度。</p>':'<p>再次查询从上次完整查询截止时间的下一秒接续。未处理申请会继续保留；遗漏的延迟日志由管理员按时间段补查。</p>';
-  const intervals=coverage.length?'<details><summary>已覆盖 '+num(coverage.length)+' 段时间</summary><ul>'+coverage.map(v=>'<li>'+esc(date(v.start*1000))+' 至 '+esc(date(v.end*1000))+'</li>').join('')+'</ul></details>':'';
-  return '<div class="query-progress" role="status"><strong>'+esc(title)+'</strong>'+range+'<span>'+(progress.scanned?'本次新增 '+num(progress.added)+' 条消费':'当前显示已保存的查询结果')+'</span>'+pending+intervals+'</div>';
+  const completed=Number.isSafeInteger(progress.end);
+  const title=completed?(progress.scanned?'查询完成':'已保存的查询结果'):'尚未完成首次查询';
+  const count=progress.scanned?'<span class="query-progress-count"><b>'+num(progress.added)+'</b> 条新增消费</span>':'';
+  const format=new Intl.DateTimeFormat('zh-CN',{timeZone:s.rules?.timezone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});
+  const cutoff=completed?'<p class="query-progress-cutoff"><span>已成功查询至</span><time datetime="'+new Date(progress.end*1000).toISOString()+'">'+esc(format.format(progress.end*1000))+'</time></p>':'';
+  const pending=gaps.length?'还有 '+num(gaps.length)+' 段新日志待查询，已保存的结果不受影响。':completed?'下次从上次截止的下一秒继续，未处理申请会保留。':'首次查询将读取当前可补时间范围内的日志。';
+  const range=window?'<div class="query-progress-window"><span>当前可补范围</span>'+renderQueryRange({from:window.start,end:window.end},{timeZone:s.rules?.timezone})+'</div>':'';
+  const intervals=coverage.length?'<ol class="query-progress-intervals">'+coverage.map((v,index)=>'<li><span>第 '+num(index+1)+' 段</span>'+renderQueryRange({from:v.start,end:v.end},{timeZone:s.rules?.timezone})+'</li>').join('')+'</ol>':'';
+  const details=range||intervals?'<details class="query-progress-details"><summary><span>查询范围与覆盖明细</span><span class="query-progress-coverage">已覆盖 '+num(coverage.length)+' 段时间</span>'+icon('chevron-down')+'</summary><div class="query-progress-details-body">'+range+intervals+'<p>遗漏的延迟日志由管理员按时间段补查。</p></div></details>':'';
+  return '<section class="query-progress" aria-label="查询结果概况"><div class="query-progress-heading" role="status"><span class="query-progress-icon" aria-hidden="true">'+icon(completed?'circle-check':'clock')+'</span><strong>'+esc(title)+'</strong>'+count+'</div>'+cutoff+'<p class="query-progress-note">'+esc(pending)+'</p>'+details+'</section>';
 }
 async function logs({refresh=false}={}){
   const owner=s.user,page=s.page;
