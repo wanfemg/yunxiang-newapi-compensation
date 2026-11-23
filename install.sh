@@ -7,7 +7,8 @@ if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     '源码仓库：YUNXIANG_REPO（默认 wanfemg/yunxiang-newapi-compensation）' \
     '分支或标签：YUNXIANG_REF（默认 main）' \
     '首次配置：NEWAPI_URL 或 NEWAPI_CONTAINER、NEWAPI_ADMIN_USER_ID、NEWAPI_ADMIN_TOKEN_FILE、PUBLIC_ORIGIN' \
-    '可选配置：COMPENSATION_PORT、NEWAPI_PORT、NEWAPI_NETWORK'
+    '可选配置：COMPENSATION_PORT、NEWAPI_PORT、NEWAPI_NETWORK' \
+    '跨服务器迁移：旧服务器 bash migrate.sh export <包>；新服务器 bash migrate.sh import <包>'
   exit 0
 fi
 [[ $(uname -s) == Linux ]] || { echo '一键部署入口用于 Linux 服务器。'; exit 1; }
@@ -36,10 +37,10 @@ source_dir=$(dirname -- "$source_dir")
 # Normalize downloaded scripts too: archives from older releases may use CRLF.
 while IFS= read -r -d '' script; do sed -i 's/\r$//' "$script"; done < <(find "$source_dir" -type f -name '*.sh' -print0)
 sed -i 's/\r$//' "$source_dir/Dockerfile"
-for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh install.sh status.sh README.md; do
+for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh install.sh status.sh migrate.sh README.md; do
   [[ -e $source_dir/$item ]] || { echo "发布包缺少 $item"; exit 1; }
 done
-for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh install.sh status.sh README.md; do
+for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh install.sh status.sh migrate.sh README.md; do
   [[ ! -L $target/$item ]] || { echo "安装路径是符号链接：$item"; exit 1; }
 done
 for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh install.sh status.sh README.md; do cp -R -- "$source_dir/$item" "$target/"; done

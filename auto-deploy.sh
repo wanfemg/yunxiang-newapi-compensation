@@ -87,6 +87,92 @@ else
   node_tool --input-type=module -e 'import {composePlan} from "./src/deployment.mjs";console.log(JSON.stringify(composePlan({network:process.argv[1],port:Number(process.argv[2])}),null,2))' "$network" "$app_port" > compose.generated.json
   mv -- .env.auto.pending .env.auto
 fi
+if [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.json ]]; then
+  echo '检查迁移部署状态：安装路径、外部网络与持久账本。'
+  volume=newapi-compensation_compensation_data
+  if ! docker volume inspect "$volume" >/dev/null 2>&1; then
+    recovery_source=''
+    if [[ -s data/compensation.sqlite ]]; then
+      recovery_source=$PWD/data
+      echo '发现本地导入的账本备份，准备恢复到持久数据卷。'
+    else
+      recovery_temp=$(mktemp -d)
+      if docker ps -a --format '{{.Names}}' | grep -qx yunxiang-compensation; then
+        if docker cp yunxiang-compensation:/app/data "$recovery_temp/data" >/dev/null 2>&1 && [[ -s $recovery_temp/data/compensation.sqlite ]]; then
+          recovery_source=$recovery_temp/data
+          echo '发现现存容器内导入的账本备份，准备恢复到持久数据卷。'
+        fi
+      fi
+    fi
+    if [[ -z $recovery_source || ! -s $recovery_source/compensation.sqlite ]]; then
+      echo '新服务器缺少持久账本数据卷 newapi-compensation_compensation_data，且未找到可恢复的账本备份。'
+      echo '云响不会新建空账本冒充迁移成功。请保留以下任一来源后重试：'
+      echo '  1. 当前目录 data/compensation.sqlite（含同目录 WAL/SHM 文件）'
+      echo '  2. 现存 yunxiang-compensation 容器内的 /app/data'
+      echo '  3. 旧服务器 bash migrate.sh export yunxiang-migration.tar.gz，本机 bash migrate.sh import yunxiang-migration.tar.gz'
+      [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"
+      exit 1
+    fi
+    if ! node_tool --input-type=module -e 'import fs from "node:fs";const b=fs.readFileSync(process.argv[1]);process.exit(b.subarray(0,15).toString("latin1")==="SQLite format 3"?0:1)' "$recovery_source/compensation.sqlite"; then
+      echo '账本备份不是有效 SQLite 文件，已停止启动。'
+      [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"
+      exit 1
+    fi
+    docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+      -v "$recovery_source:/restore:ro" -v "$volume:/data:rw" -w /data \
+      node:24-bookworm-slim node -e 'const fs=require("fs");const source=process.env.RECOVERY_SOURCE||"/restore";fs.copyFileSync(source+"/compensation.sqlite","/data/compensation.sqlite");for(const name of ["compensation.sqlite-wal","compensation.sqlite-shm","secrets.key","dingtalk.enc"]){try{fs.copyFileSync(source+"/"+name,"/data/"+name)}catch{}}fs.chmodSync("/data",0o700)'
+    if [[ -f $recovery_source/compensation.sqlite ]]; then :; else
+      echo '账本恢复失败：未找到 SQLite 主文件。'
+      [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"
+      exit 1
+    fi
+    docker volume inspect "$volume" >/dev/null
+    echo "已恢复持久账本数据卷：$volume"
+    [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"
+    unset recovery_source recovery_temp
+  fi
+  recovery=$(node_tool src/deployment-recovery.mjs normalize "$PWD" < compose.generated.json)
+  recovery_changes=$(printf '%s' "$recovery" | node_tool --input-type=module -e 'import fs from "node:fs";console.log(JSON.parse(fs.readFileSync(0,"utf8")).changes.join(","))')
+  if [[ -n $recovery_changes ]]; then
+    printf '%s' "$recovery" | node_tool --input-type=module -e 'import fs from "node:fs";process.stdout.write(JSON.stringify(JSON.parse(fs.readFileSync(0,"utf8")).compose,null,2)+"\n")' > compose.generated.json.pending
+    mv -- compose.generated.json.pending compose.generated.json
+    echo "已修复迁移带来的绝对路径：$recovery_changes"
+  fi
+  network=$(node_tool --input-type=module -e 'import fs from "node:fs";console.log(JSON.parse(fs.readFileSync("compose.generated.json","utf8")).services.compensation.network_mode)')
+  if [[ $network != host ]]; then
+    if ! docker network inspect "$network" >/dev/null 2>&1; then
+      echo "外部网络 $network 不存在，正在按当前 云中猫API小站 容器重新识别。"
+      db_container=''
+      [[ -z $db_container ]] && db_container=$(printf '%s' "$(node_tool --input-type=module -e 'import fs from "node:fs";const m=JSON.parse(fs.readFileSync("secrets/newapi_database.json","utf8"));console.log(m.container||"")')" | tr -d '\r')
+      inspected=''
+      if [[ -z $db_container ]]; then
+        ids=$(docker ps -q)
+        if [[ -n $ids ]]; then
+          choices=$(docker inspect $ids | node_tool src/deployment.mjs candidates)
+          count=$(printf '%s' "$choices" | node_tool --input-type=module -e 'import fs from "node:fs";console.log(JSON.parse(fs.readFileSync(0,"utf8")).length)')
+          if [[ $count == 1 ]]; then db_container=$(printf '%s' "$choices" | json_get 0.name); fi
+        fi
+      fi
+      if [[ -n $db_container ]]; then inspected=$(docker inspect --type container --format '{{json .}}' "$db_container"); fi
+      recovered=''
+      if [[ -n $inspected ]]; then
+        recovered=$(node_tool src/deployment-recovery.mjs network < compose.generated.json "$inspected" "${NEWAPI_NETWORK:-}" 2>/dev/null || true)
+      elif [[ -n ${NEWAPI_NETWORK:-} ]]; then
+        recovered=$(node_tool src/deployment-recovery.mjs set-network < compose.generated.json "${NEWAPI_NETWORK:-}" 2>/dev/null || true)
+      fi
+      if [[ -z $recovered ]]; then
+        echo '无法唯一识别新服务器上的 云中猫API小站 网络。'
+        [[ -n ${NEWAPI_NETWORK:-} ]] || echo '设置 NEWAPI_NETWORK=<网络名> 后重试；或使用 NEWAPI_URL 指定已发布的原站地址重新迁移。'
+        exit 1
+      fi
+      network=$(printf '%s' "$recovered" | node_tool --input-type=module -e 'import fs from "node:fs";console.log(JSON.parse(fs.readFileSync(0,"utf8")).compose.services.compensation.network_mode)')
+      printf '%s' "$recovered" | node_tool --input-type=module -e 'import fs from "node:fs";const x=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(JSON.stringify(x.compose,null,2)+"\n")' > compose.generated.json.pending
+      mv -- compose.generated.json.pending compose.generated.json
+      echo "已恢复云响网络：$network"
+    fi
+    [[ $(docker network inspect --format '{{.Driver}}' "$network") == bridge ]] || { echo '云响外部网络必须是 bridge 网络。'; exit 1; }
+  fi
+fi
 if [[ ! -s secrets/newapi_admin_token ]]; then
   token=${NEWAPI_ADMIN_TOKEN:-}
   if [[ -n ${NEWAPI_ADMIN_TOKEN_FILE:-} ]]; then
@@ -127,6 +213,7 @@ echo '宝塔 Docker → 编排：导入上方现有文件；不要另建副本�
 echo 'Docker Compose 项目名：newapi-compensation；容器名：yunxiang-compensation'
 echo '宝塔镜像搜索：yunxiang-newapi-compensation（同时检查本地镜像，不是镜像仓库搜索）。'
 echo '备份：docker compose -p newapi-compensation -f docker-compose.yml exec -T compensation node src/backup.mjs'
+echo '迁移：旧服务器 bash migrate.sh export <包>；新服务器 bash migrate.sh import <包> 后运行本脚本。'
 echo '诊断：bash status.sh；日志：docker compose -p newapi-compensation -f docker-compose.yml logs --tail 100 compensation'
 echo '更新：在本目录运行 bash install.sh；下载式更新使用原一键命令。'
 echo '登录：使用原 云中猫API小站 用户或站长账号；生产不会创建演示账号。'

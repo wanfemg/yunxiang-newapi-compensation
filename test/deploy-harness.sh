@@ -5,15 +5,39 @@ uname(){ printf 'Linux\n'; }
 flock(){ return 0; }
 ss(){ return 0; }
 docker(){
-  case $1 in
+  local docker_verb=$1
+  case $docker_verb in
     info) return 0 ;;
     context) echo default ;;
     image) echo 'fixture image exists' ;;
+    volume)
+      if [[ ${MOCK_VOLUME_MISSING:-0} == 1 ]]; then return 1; fi
+      echo 'fixture volume exists'
+      ;;
+    volume-after-recovery)
+      echo 'fixture volume restored'
+      ;;
     run)
+      local full_args=("$@") mount_source='' mount_destination='' prev=''
+      for arg in "${full_args[@]}"; do
+        if [[ $prev == -v && $arg == *:/restore:ro ]]; then mount_source=${arg%:/restore:ro}; fi
+        if [[ $prev == -v && $arg == *:/data:rw ]]; then mount_destination=${arg%:/data:rw}; fi
+        prev=$arg
+      done
       while [[ $1 != node:24-bookworm-slim ]]; do shift; done
       shift; shift
-      "$NODE_EXE" "$@"
+      if [[ -n $mount_source && -n $mount_destination ]]; then
+        mkdir -p "$mount_destination"
+        cp -- "$mount_source/compensation.sqlite" "$mount_destination/compensation.sqlite"
+        for name in compensation.sqlite-wal compensation.sqlite-shm secrets.key dingtalk.enc; do
+          [[ -f $mount_source/$name ]] && cp -- "$mount_source/$name" "$mount_destination/$name"
+        done
+        MOCK_VOLUME_MISSING=''
+      else
+        "$NODE_EXE" "$@"
+      fi
       ;;
+    cp) return 1 ;;
     compose)
       if [[ " $* " == *' config '* && " $* " != *' --quiet '* ]]; then
         "$NODE_EXE" --input-type=module -e 'import fs from "node:fs";import path from "node:path";const p=JSON.parse(fs.readFileSync("compose.generated.json","utf8"));p.services.compensation.build.context=process.cwd();for(const s of Object.values(p.secrets))s.file=path.resolve(s.file);console.log(JSON.stringify(p));'
@@ -25,6 +49,18 @@ docker(){
         [[ -z ${NEWAPI_URL:-} && -z ${PUBLIC_ORIGIN:-} && -z ${NEWAPI_ADMIN_USER_ID:-} ]] || return 43
         echo 'fixture health/preflight passed'
       fi
+      ;;
+    network)
+      if [[ $2 == inspect ]]; then
+        if [[ -n ${MOCK_NETWORK_MISSING:-} && $3 == "$MOCK_NETWORK_MISSING" ]]; then return 1; fi
+        echo bridge
+      fi
+      ;;
+    ps)
+      return 0
+      ;;
+    inspect)
+      return 1
       ;;
     *) echo "unexpected docker call: $*" >&2; return 44 ;;
   esac

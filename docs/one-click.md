@@ -74,4 +74,10 @@ docker compose --env-file .env.auto -f compose.generated.json logs --tail 100 co
 
 仅使用本地已下载的源码时，`bash install.sh` 会重新构建当前源码；需要获取仓库新版本时重新运行上方下载式命令。部署通过文件锁禁止并发操作。构建或接入检查失败会保留持久数据，终端不会输出部署成功。
 
+## 跨服务器迁移
+
+云响账本在 Docker named volume `newapi-compensation_compensation_data`，只复制源码目录不会迁移数据。旧服务器执行 `bash migrate.sh export yunxiang-migration.tar.gz`，把迁移包传到新服务器的云响源码目录后执行 `bash migrate.sh import yunxiang-migration.tar.gz`，最后运行 `bash install.sh`。
+
+导入会恢复数据卷、`.env.auto`、`compose.generated.json` 和宿主机 secrets；不会恢复镜像，也不会覆盖已有数据卷。手动把账本放到当前目录 `data/`（包含 SQLite 及同目录 WAL/SHM 文件）或现存 `yunxiang-compensation` 容器的 `/app/data` 时，安装器会自动恢复到持久卷，不需要再执行导入。新服务器缺少原外部网络时，安装器会按当前 云中猫API小站 容器重新识别网络，无法唯一识别时用 `NEWAPI_NETWORK` 指定。迁移自检发现旧绝对路径会自动改写为当前安装目录。数据卷缺失且没有任何可恢复账本时安装会停止，不会新建空账本冒充迁移成功。
+
 Logo 从 云中猫API小站 `/api/status` 的 `logo` 读取，站内路径由后端同源代理；外部 HTTPS Logo 由浏览器无 referrer 加载。缺失或加载失败保留默认云朵图标。

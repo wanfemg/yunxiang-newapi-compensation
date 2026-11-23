@@ -10,6 +10,13 @@ echo '=== 云响本地镜像（新旧名称） ==='
 docker image ls --filter reference='*compensation*' || failed=1
 echo '=== 云响 Compose 容器 ==='
 docker ps -a --filter label=com.docker.compose.project=newapi-compensation --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' || failed=1
+echo '=== 持久账本数据卷 ==='
+docker volume inspect newapi-compensation_compensation_data --format '名称：{{.Name}}；创建时间：{{.CreatedAt}}' || failed=1
+if docker volume inspect newapi-compensation_compensation_data >/dev/null 2>&1; then
+  echo '数据卷存在；缺失时不要重装成空账本，使用 migrate.sh 导入旧服务器备份。'
+else
+  echo '数据卷缺失：部署会自动尝试 data/compensation.sqlite 或现存容器内账本；都没有才会停止。'
+fi
 if [[ -s docker-compose.yml ]]; then
   args=(-p newapi-compensation -f docker-compose.yml)
 elif [[ -s .env.auto && -s compose.generated.json ]]; then

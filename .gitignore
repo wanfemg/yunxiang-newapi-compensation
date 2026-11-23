@@ -9,6 +9,7 @@ docker-compose.yml
 docker-compose.yml.pending
 secrets/
 data/
+newapi-compensation_compensation_data/
 coverage/
 node_modules/
 .playwright-cli/
