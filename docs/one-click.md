@@ -12,7 +12,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-comp
 
 首次运行会依次检测 Docker、Compose 与 云中猫API小站 容器，询问本机端口、访问域名、站长 ID 和管理令牌，再构建镜像、启动持久化服务并执行只读接入检查。成功后终端输出访问地址。管理令牌隐藏输入，不保存原站密码，不创建默认生产账号。Linux 需安装 `curl`、`tar`、`util-linux`（提供 `flock`）。
 
-查看参数：`bash install.sh --help`。固定版本时将命令 URL 中的 `main` 与 `YUNXIANG_REF` 同时改成同一标签或提交号；不要只修改其中一个。检测到已有部署时，交互入口会提供三个操作：更新、迁移修复和重新安装。更新保留数据卷、secrets 和接入配置并重建启动；迁移修复用于新服务器路径、网络或账本卷异常；重新安装会清理旧容器后重建，仍保留数据卷、secrets 和接入配置。无人值守入口可用 `--update`、`--migrate`、`--reinstall` 或 `YUNXIANG_DEPLOY_MODE` 指定。
+查看参数：`bash install.sh --help`。固定版本时将命令 URL 中的 `main` 与 `YUNXIANG_REF` 同时改成同一标签或提交号；不要只修改其中一个。检测到已有部署时，交互入口会提供四个操作：更新、迁移修复、重新安装和彻底卸载。更新保留数据卷、secrets 和接入配置并重建启动；迁移修复用于新服务器路径、网络或账本卷异常；重新安装会清理旧容器后重建，仍保留数据卷、secrets 和接入配置；彻底卸载会删除云响专属数据。无人值守入口可用 `--update`、`--migrate`、`--reinstall`、`--uninstall` 或 `YUNXIANG_DEPLOY_MODE` 指定。
 
 ## 无人值守部署
 
@@ -26,6 +26,24 @@ export PUBLIC_ORIGIN=https://refund.example.com
 export COMPENSATION_PORT=3210
 bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-compensation/main/install.sh) --non-interactive
 ```
+
+## 彻底卸载
+
+卸载前如需保留账本，先按“持久化与备份”导出备份。确认不再保留数据后，在服务器执行：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-compensation/main/uninstall.sh)
+```
+
+交互模式需要输入 `彻底卸载` 确认。确认后删除云响专属容器 `yunxiang-compensation`、Compose 项目 `newapi-compensation`、本地镜像 `yunxiang-newapi-compensation:local`、账本数据卷 `newapi-compensation_compensation_data`、宿主机 secrets 和安装目录（默认 `/opt/yunxiang`）。命令不修改 云中猫API小站 容器、网络、数据库、反向代理或 TLS 证书。
+
+已进入下载式安装菜单时也可选择 `4. 彻底卸载`。远程脚本会在确认后执行本地 `uninstall.sh`，不先下载源码。无人值守卸载使用：
+
+```bash
+YUNXIANG_INSTALL_DIR=/opt/yunxiang bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-compensation/main/uninstall.sh) --yes
+```
+
+自定义安装目录必须设置 `YUNXIANG_INSTALL_DIR`。卸载脚本拒绝 `/`、`/opt`、`/home` 等高危路径；目录存在但缺少云响标识文件时同样拒绝删除。
 
 同机 Docker 自动适配使用 `NEWAPI_CONTAINER` 指定容器，不设置 `NEWAPI_URL`。多个网络使用 `NEWAPI_NETWORK`，非默认内部端口使用 `NEWAPI_PORT`。管理 ID、令牌缺失时安装报错退出，不生成猜测的凭据。更新使用已有配置，当前 shell 的原站地址、管理 ID 和域名不会覆盖已有账本的接入设置。
 

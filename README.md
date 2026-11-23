@@ -15,6 +15,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-comp
 
 首次交互配置后自动构建、启动和检查接入；再次执行更新源码，保留数据卷与接入配置。无人值守参数见 `docs/one-click.md`。
 
+彻底卸载（删除云响账本数据卷、secrets 与安装目录，不修改 云中猫API小站）：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-compensation/main/uninstall.sh)
+```
+
 在本目录执行：
 
 ~~~powershell
