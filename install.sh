@@ -2,12 +2,14 @@
 set -euo pipefail
 umask 077
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-  printf '%s\n' '云响一键部署：bash install.sh [--non-interactive]' \
+  printf '%s\n' '云响一键部署：bash install.sh [--non-interactive|--update|--migrate|--reinstall]' \
     '安装目录：YUNXIANG_INSTALL_DIR（默认 /opt/yunxiang）' \
     '源码仓库：YUNXIANG_REPO（默认 wanfemg/yunxiang-newapi-compensation）' \
     '分支或标签：YUNXIANG_REF（默认 main）' \
     '首次配置：NEWAPI_URL 或 NEWAPI_CONTAINER、NEWAPI_ADMIN_USER_ID、NEWAPI_ADMIN_TOKEN_FILE、PUBLIC_ORIGIN' \
     '可选配置：COMPENSATION_PORT、NEWAPI_PORT、NEWAPI_NETWORK' \
+    '部署模式：已有部署交互选择更新/迁移修复/重新安装；无人值守默认 update' \
+    '环境变量：YUNXIANG_DEPLOY_MODE=update|migrate|reinstall' \
     '跨服务器迁移：旧服务器 bash migrate.sh export <包>；新服务器 bash migrate.sh import <包>'
   exit 0
 fi

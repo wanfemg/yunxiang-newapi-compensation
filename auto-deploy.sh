@@ -4,13 +4,42 @@ umask 077
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 trap 'code=$?; printf "部署失败（退出码 %s，行 %s），未删除持久数据。运行 bash status.sh 查看诊断。\n" "$code" "$LINENO" >&2; exit "$code"' ERR
 non_interactive=0
-case ${1:-} in
-  --non-interactive) non_interactive=1 ;;
-  --help|-h) exec bash install.sh --help ;;
-  '') ;;
-  *) echo "未知参数：$1"; exit 1 ;;
-esac
-(( $# <= 1 )) || { echo '参数过多。'; exit 1; }
+deploy_mode=${YUNXIANG_DEPLOY_MODE:-update}
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --non-interactive) non_interactive=1 ;;
+    --update) deploy_mode=update ;;
+    --migrate) deploy_mode=migrate ;;
+    --reinstall) deploy_mode=reinstall ;;
+    --mode)
+      [[ -n ${2:-} ]] || { echo '--mode 需要参数：update、migrate 或 reinstall。'; exit 1; }
+      deploy_mode=$2; shift
+      ;;
+    --help|-h) exec bash install.sh --help ;;
+    '') ;;
+    *) echo "未知参数：$1"; exec bash install.sh --help; exit 1 ;;
+  esac
+  shift
+done
+case $deploy_mode in update|migrate|reinstall) ;; *) echo "未知部署模式：$deploy_mode"; exit 1 ;; esac
+if [[ $non_interactive == 0 && $deploy_mode == update && -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.json ]]; then
+  # The mode choice must run before the prompt helper definition is needed.
+  prompt(){ local label=$1 default=$2 answer=''; if [[ -r /dev/tty && -w /dev/tty ]]; then printf '%s' "$label" > /dev/tty; IFS= read -r answer < /dev/tty || { echo '交互输入已结束。'; exit 1; }; fi; REPLY=${answer:-$default}; }
+  cat >&2 <<'EOF'
+检测到已有云响部署。请选择操作：
+1. 更新（默认）：下载/保留源码并重建启动，保留数据卷、secrets 和接入配置
+2. 迁移修复：检查迁移路径、外部网络和持久账本，适合新服务器启动异常
+3. 重新安装：删除旧容器后重建，保留数据卷、secrets 和接入配置
+EOF
+  prompt '选择操作 [1-3，默认 1]: ' '1'
+  case $REPLY in
+    1) deploy_mode=update ;;
+    2) deploy_mode=migrate ;;
+    3) deploy_mode=reinstall ;;
+    *) echo '选项无效。'; exit 1 ;;
+  esac
+fi
+(( $# <= 2 )) || { echo '参数过多。'; exec bash install.sh --help; exit 1; }
 # Read prompts from the terminal so both process substitution and curl pipes work.
 prompt(){
   local label=$1 default=$2 answer=''
@@ -34,8 +63,27 @@ chmod 700 secrets
 node_tool(){ docker run --rm -i --network none --read-only --cap-drop ALL --security-opt no-new-privileges --mount "type=bind,src=$PWD/src,dst=/app/src,readonly" -w /app node:24-bookworm-slim node "$@"; }
 json_get(){ node_tool --input-type=module -e 'import fs from "node:fs";let x=JSON.parse(fs.readFileSync(0,"utf8"));for(const k of process.argv[1].split("."))x=x?.[k];process.stdout.write(typeof x==="object"?JSON.stringify(x):String(x??""));' "$1"; }
 valid_port(){ [[ $1 =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
+if [[ $deploy_mode == reinstall ]]; then
+  [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.json ]] || { echo '重新安装需要已有接入配置；首次安装直接运行默认模式。'; exit 1; }
+  if [[ -s docker-compose.yml ]]; then
+    docker compose -p newapi-compensation -f docker-compose.yml down || true
+  fi
+  docker ps -aq --filter label=com.docker.compose.project=newapi-compensation | xargs -r docker rm -f
+  echo '已清理旧云响容器；数据卷、secrets 和接入配置已保留。'
+fi
+if [[ -s .env.auto && -s compose.generated.json ]]; then
+  volume=newapi-compensation_compensation_data
+  if docker volume inspect "$volume" >/dev/null 2>&1; then
+    docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges \
+      -v "$volume:/data:rw" -w /data node:24-bookworm-slim \
+      sh -c 'chown -R 1000:1000 /data && chmod 700 /data'
+  fi
+fi
 if [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.json ]]; then
-  echo '复用已有接入配置与持久数据卷，更新云响，不修改 云中猫API小站。'
+  echo "部署模式：$deploy_mode；复用已有接入配置与持久数据卷，不修改 云中猫API小站。"
+elif [[ $deploy_mode == migrate ]]; then
+  echo '未发现完整部署配置；迁移修复仅用于已有部署，先执行默认安装或 migrate.sh import。'
+  exit 1
 else
   [[ ! -e .env.auto && ! -e compose.generated.json ]] || { echo '部署配置不完整，保留现有文件；核对 .env.auto、compose.generated.json 和数据库识别文件后重试。'; exit 1; }
   container=${NEWAPI_CONTAINER:-}
@@ -118,9 +166,9 @@ if [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.js
       [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"
       exit 1
     fi
-    docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+    docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges \
       -v "$recovery_source:/restore:ro" -v "$volume:/data:rw" -w /data \
-      node:24-bookworm-slim node -e 'const fs=require("fs");const source=process.env.RECOVERY_SOURCE||"/restore";fs.copyFileSync(source+"/compensation.sqlite","/data/compensation.sqlite");for(const name of ["compensation.sqlite-wal","compensation.sqlite-shm","secrets.key","dingtalk.enc"]){try{fs.copyFileSync(source+"/"+name,"/data/"+name)}catch{}}fs.chmodSync("/data",0o700)'
+      node:24-bookworm-slim sh -c 'chown -R 1000:1000 /data && chmod 700 /data && chmod 600 /data/compensation.sqlite 2>/dev/null || true && chmod 600 /data/compensation.sqlite-wal /data/compensation.sqlite-shm 2>/dev/null || true'
     if [[ -f $recovery_source/compensation.sqlite ]]; then :; else
       echo '账本恢复失败：未找到 SQLite 主文件。'
       [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"

@@ -15,6 +15,7 @@ const setup=()=>{
   return dir;
 };
 const run=(dir,extra={})=>spawnSync(bash,[harness],{cwd:dir,encoding:'utf8',timeout:30000,env:{...process.env,NODE_EXE:process.execPath.replaceAll('\\','/'),NEWAPI_URL:'https://newapi.example.com',NEWAPI_ADMIN_USER_ID:'1',NEWAPI_ADMIN_TOKEN:'fixture-deploy-token',PUBLIC_ORIGIN:'https://refund.example.com',COMPENSATION_PORT:'3210',...extra}});
+const runMode=(dir,mode,extra={})=>spawnSync(bash,[harness,mode],{cwd:dir,encoding:'utf8',timeout:30000,env:{...process.env,NODE_EXE:process.execPath.replaceAll('\\','/'),NEWAPI_URL:'https://newapi.example.com',NEWAPI_ADMIN_USER_ID:'1',NEWAPI_ADMIN_TOKEN:'fixture-deploy-token',PUBLIC_ORIGIN:'https://refund.example.com',COMPENSATION_PORT:'3210',...extra}});
 
 test('one-click shell writes first-run config and reuses it on updates',{skip:!available},()=>{
   const dir=setup();
@@ -49,6 +50,22 @@ test('legacy generated deployment migrates names without changing upstream or da
     const migrated=JSON.parse(readFileSync(file,'utf8'));
     assert.equal(migrated.services.compensation.image,'yunxiang-newapi-compensation:local');
     assert.equal(migrated.volumes.compensation_data.name,'newapi-compensation_compensation_data');
+    assert.equal(readFileSync(join(dir,'.env.auto'),'utf8'),env);
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+test('deployment entry supports explicit update migrate and reinstall modes',{skip:!available},()=>{
+  const dir=setup();
+  try{
+    assert.equal(run(dir).status,0);
+    const env=readFileSync(join(dir,'.env.auto'),'utf8');
+    const update=runMode(dir,'--migrate');
+    assert.equal(update.status,0,update.stdout+update.stderr);
+    assert.match(update.stdout,/部署模式：migrate/);
+    assert.equal(readFileSync(join(dir,'.env.auto'),'utf8'),env);
+    const reinstall=runMode(dir,'--reinstall');
+    assert.equal(reinstall.status,0,reinstall.stdout+reinstall.stderr);
+    assert.match(reinstall.stdout,/部署模式：reinstall/);
+    assert.match(reinstall.stdout,/已清理旧云响容器/);
     assert.equal(readFileSync(join(dir,'.env.auto'),'utf8'),env);
   }finally{rmSync(dir,{recursive:true,force:true});}
 });

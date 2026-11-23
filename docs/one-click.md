@@ -12,7 +12,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-comp
 
 首次运行会依次检测 Docker、Compose 与 云中猫API小站 容器，询问本机端口、访问域名、站长 ID 和管理令牌，再构建镜像、启动持久化服务并执行只读接入检查。成功后终端输出访问地址。管理令牌隐藏输入，不保存原站密码，不创建默认生产账号。Linux 需安装 `curl`、`tar`、`util-linux`（提供 `flock`）。
 
-查看参数：`bash install.sh --help`。固定版本时将命令 URL 中的 `main` 与 `YUNXIANG_REF` 同时改成同一标签或提交号；不要只修改其中一个。
+查看参数：`bash install.sh --help`。固定版本时将命令 URL 中的 `main` 与 `YUNXIANG_REF` 同时改成同一标签或提交号；不要只修改其中一个。检测到已有部署时，交互入口会提供三个操作：更新、迁移修复和重新安装。更新保留数据卷、secrets 和接入配置并重建启动；迁移修复用于新服务器路径、网络或账本卷异常；重新安装会清理旧容器后重建，仍保留数据卷、secrets 和接入配置。无人值守入口可用 `--update`、`--migrate`、`--reinstall` 或 `YUNXIANG_DEPLOY_MODE` 指定。
 
 ## 无人值守部署
 

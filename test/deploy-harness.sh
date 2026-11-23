@@ -28,12 +28,16 @@ docker(){
       shift; shift
       if [[ -n $mount_source && -n $mount_destination ]]; then
         mkdir -p "$mount_destination"
-        cp -- "$mount_source/compensation.sqlite" "$mount_destination/compensation.sqlite"
-        for name in compensation.sqlite-wal compensation.sqlite-shm secrets.key dingtalk.enc; do
-          [[ -f $mount_source/$name ]] && cp -- "$mount_source/$name" "$mount_destination/$name"
-        done
+        if [[ -f $mount_source/compensation.sqlite && " $* " == *" chown "* ]]; then
+          cp -- "$mount_source/compensation.sqlite" "$mount_destination/compensation.sqlite"
+          for name in compensation.sqlite-wal compensation.sqlite-shm secrets.key dingtalk.enc; do
+            [[ -f $mount_source/$name ]] && cp -- "$mount_source/$name" "$mount_destination/$name"
+          done
+        fi
+        chmod 700 "$mount_destination" 2>/dev/null || true
         MOCK_VOLUME_MISSING=''
       else
+        if [[ " $* " == *" chown "* ]]; then return 0; fi
         "$NODE_EXE" "$@"
       fi
       ;;
@@ -66,4 +70,7 @@ docker(){
   esac
 }
 export -f uname flock ss docker
-exec bash auto-deploy.sh --non-interactive
+if (($# == 0)); then
+  exec bash auto-deploy.sh --non-interactive
+fi
+exec bash auto-deploy.sh --non-interactive "$@"

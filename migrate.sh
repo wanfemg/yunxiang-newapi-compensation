@@ -38,7 +38,7 @@ if [[ $action == export ]]; then
   trap 'rm -rf -- "$temp"' EXIT
   docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
     -v "$volume:/data:ro" -v "$temp:/backup" -w /data alpine:3.20 \
-    sh -c 'mkdir -p /backup/volume && cp -a /app/. /backup/volume/ 2>/dev/null || cp -a /data/. /backup/volume/'
+    sh -c 'mkdir -p /backup/volume && cp -a /data/. /backup/volume/'
   cp -- .env.auto compose.generated.json "$temp/"
   cp -- secrets/newapi_admin_token secrets/newapi_database.json "$temp/secrets.$$"
   mkdir -p "$temp/secrets"
@@ -72,9 +72,9 @@ temp=$(mktemp -d)
 trap 'rm -rf -- "$temp"' EXIT
 tar --extract --gzip --file "$archive" --directory "$temp"
 [[ -s $temp/.env.auto && -s $temp/compose.generated.json && -s $temp/secrets/newapi_admin_token ]] || { echo '迁移包缺少部署配置或 secrets。'; exit 1; }
-docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges \
   -v "$volume:/data:rw" -v "$temp:/restore:ro" -w /data alpine:3.20 \
-  sh -c 'cp -a /restore/volume/. /data/'
+  sh -c 'cp -a /restore/volume/. /data/ && chown -R 1000:1000 /data && chmod 700 /data'
 cp -- "$temp/.env.auto" "$temp/compose.generated.json" .
 cp -- "$temp/secrets/newapi_admin_token" "$temp/secrets/newapi_database.json" secrets/
 chmod 600 .env.auto compose.generated.json
