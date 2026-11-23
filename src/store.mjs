@@ -264,7 +264,7 @@ export class Store {
     const label={pending:'待人工审核',approved:'已通过，等待执行',succeeded:'已补回',failed:'返还失败',unknown:'待人工对账',rejected:'已驳回',executing:'执行中'}[claim.status]||claim.status;
     const amount=claim.status==='succeeded'?claim.amount:claim.amount||expectedQuota(claim.log,claim.rules);
     const title=notificationTitle(event,claim.status);
-    const text='### '+title+'\n'+[
+    const text=[
       ['申请号',claim.id],['用户',claim.username+'（ID '+claim.user_id+'）'],['类型',compensationLabel(claim.log,claim.source)],['模型',claim.log.model_name],['原请求',claim.request_id],['补回额度',display?formatQuota(amount,display):'站点显示配置待同步'],['状态',label],['处理说明',note],['时间',new Date().toLocaleString('zh-CN',{timeZone:this.rules().timezone,hour12:false})]
     ].map(([key,value])=>'- **'+key+'**：'+safe(value)).join('\n');
     this.notify(event,JSON.stringify({title,text}));
@@ -281,7 +281,7 @@ export class Store {
     const batch=this.queryBatch(runId),waiting=batch?.status==='waiting_limit';
     const title=waiting?'审核结果 · 补偿暂缓':batchNotificationTitle(claims,hasAI);
     const rows=claims.map(c=>`- **${safe(c.log.model_name)}** · ${safe(c.request_id)} · ${labels[c.status]||safe(c.status)} · ${display?formatQuota(c.status==='succeeded'?c.amount:expectedQuota(c.log,c.rules),display):c.status==='succeeded'?c.amount:expectedQuota(c.log,c.rules)}${c.review_note?' · '+safe(c.review_note):''}`);
-    const text='### '+title+'\n'+[
+    const text=[
       `- **用户**：${safe(claims[0].username)}（ID ${claims[0].user_id}）`,
       `- **申请笔数 / 模型数**：${claims.length} / ${new Set(claims.map(c=>c.log.model_name)).size}`,
       `- **已确认补回**：${succeeded.length} 笔 · ${display?formatQuota(total,display):total}`,

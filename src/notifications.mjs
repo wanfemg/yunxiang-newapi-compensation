@@ -2,11 +2,11 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { AppError } from './rules.mjs';
-import {notificationMarkdown} from './notification-titles.mjs';
+import {dingtalkPayload} from './dingtalk-message.mjs';
 
 export class DingTalk {
-  constructor(store, directory, fetcher = fetch) {
-    this.store = store; this.fetcher = fetcher; this.running = false;
+  constructor(store, directory, fetcher = fetch, origin = null) {
+    this.store = store; this.fetcher = fetcher; this.running = false; this.origin = origin;
     this.file = join(directory, 'dingtalk.enc');
     const keyFile = join(directory, 'secrets.key');
     if (!existsSync(keyFile)) writeFileSync(keyFile, randomBytes(32), { mode: 0o600, flag: 'wx' });
@@ -56,8 +56,8 @@ export class DingTalk {
         url.searchParams.set('sign', createHmac('sha256', config.secret).update(`${timestamp}\n${config.secret}`).digest('base64'));
         let success = false;
         try {
-          const markdown=notificationMarkdown(row);
-          const response = await this.fetcher(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ msgtype: 'markdown', markdown,at:{isAtAll:false} }), redirect: 'error', signal: AbortSignal.timeout(8000) });
+          const payload=dingtalkPayload(row,this.origin||'http://127.0.0.1:3210/');
+          const response = await this.fetcher(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), redirect: 'error', signal: AbortSignal.timeout(8000) });
           success = response.ok && (await response.json()).errcode === 0;
         } catch {}
         const attempts = row.attempts + 1;

@@ -408,7 +408,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const port = Number(process.env.PORT || 3210), host = process.env.HOST || '127.0.0.1';
   const origin = process.env.PUBLIC_ORIGIN || `http://127.0.0.1:${port}`;
   if (new URL(origin).protocol !== 'https:' && !['127.0.0.1', 'localhost', '[::1]'].includes(new URL(origin).hostname)) throw new Error('公网访问的 PUBLIC_ORIGIN 必须为 HTTPS');
-  const dingTalk = new DingTalk(store, data);
+  const dingTalk = new DingTalk(store, data, fetch, origin);
   const emailNotifications = new EmailNotifications(store, data, {upstream});
   const { server, drain } = createApplication({ store, upstream, origin, dingTalk, emailNotifications });
   server.listen(port, host, () => console.log(`云中猫API小站 补空回已启动：${origin}（未配置上游时仅显示登录入口）`));
