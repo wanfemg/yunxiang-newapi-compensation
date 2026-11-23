@@ -70,6 +70,12 @@ docker(){
   esac
 }
 export -f uname flock ss docker
+curl(){ local output=''; while (($# > 0)); do if [[ $1 == -o ]]; then output=$2; fi; shift; done; [[ -n $output ]] || return 1; cp "$ARCHIVE" "$output"; }
+export -f curl
+if [[ -n ${YUNXIANG_INSTALLER:-} ]]; then
+  source "$YUNXIANG_INSTALLER" < "$YUNXIANG_ANSWER"
+  exit $?
+fi
 if (($# == 0)); then
   exec bash auto-deploy.sh --non-interactive
 fi

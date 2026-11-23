@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,cpSync,readFileSync,writeFileSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
+import {mkdirSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
 
@@ -9,6 +10,22 @@ const bash=process.env.BASH_PATH||(process.platform==='win32'?'C:/Program Files/
 const available=spawnSync(bash,['--version'],{encoding:'utf8'}).status===0;
 const root=resolve(import.meta.dirname,'..');
 const harness=join(import.meta.dirname,'deploy-harness.sh').replaceAll('\\','/');
+const toMsys=path=>path.replaceAll('\\','/').replace(/^([A-Za-z]):/,(_,drive)=>`/${drive.toLowerCase()}`);
+const remotePackage=(dir)=>{
+  const source=join(dir,'remote-source');
+  mkdirSync(source,{recursive:true});
+  for(const file of ['src','public','test','Dockerfile','.dockerignore','.gitattributes','package.json','package-lock.json','auto-deploy.sh','install.sh','status.sh','migrate.sh','README.md'])cpSync(join(root,file),join(source,file),{recursive:true});
+  const archive=join(dir,'yunxiang-source.tar.gz');
+  const tar=spawnSync(bash,['-lc','tar -czf "$1" -C "$2" remote-source','--',toMsys(archive),toMsys(dir)],{cwd:dir,encoding:'utf8'});
+  assert.equal(tar.status,0,tar.stdout+tar.stderr);
+  const answer=join(dir,'one-click-answer');
+  writeFileSync(answer,'2\n');
+  const installer=join(dir,'installer');
+  mkdirSync(installer,{recursive:true});
+  cpSync(join(root,'install.sh'),join(installer,'install.sh'));
+  cpSync(join(root,'test','deploy-harness.sh'),join(installer,'deploy-harness.sh'));
+  return {archive,answer,installer};
+};
 const setup=()=>{
   const dir=mkdtempSync(join(tmpdir(),'yunxiang-deploy-'));
   for(const file of ['auto-deploy.sh','install.sh','src'])cpSync(join(root,file),join(dir,file),{recursive:true});
@@ -67,6 +84,23 @@ test('deployment entry supports explicit update migrate and reinstall modes',{sk
     assert.match(reinstall.stdout,/部署模式：reinstall/);
     assert.match(reinstall.stdout,/已清理旧云响容器/);
     assert.equal(readFileSync(join(dir,'.env.auto'),'utf8'),env);
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
+test('one-click installer prompts before downloading an existing deployment',{skip:!available},()=>{
+  const dir=setup();
+  try{
+    assert.equal(run(dir).status,0);
+    const {archive,answer,installer}=remotePackage(dir);
+    const remote=spawnSync(bash,[harness],{
+      cwd:dir,
+      encoding:'utf8',
+      timeout:30000,
+      input:'2\n',
+      env:{...process.env,ARCHIVE:toMsys(archive),YUNXIANG_INSTALLER:toMsys(join(installer,'install.sh')),YUNXIANG_ANSWER:toMsys(answer),NODE_EXE:process.execPath.replaceAll('\\','/'),YUNXIANG_INSTALL_DIR:dir,NEWAPI_URL:'https://newapi.example.com',NEWAPI_ADMIN_USER_ID:'1',NEWAPI_ADMIN_TOKEN:'fixture-deploy-token',PUBLIC_ORIGIN:'https://refund.example.com',COMPENSATION_PORT:'3210'}
+    });
+    assert.equal(remote.status,0,remote.stdout+remote.stderr);
+    assert.match(remote.stdout,/部署模式：migrate/);
+    assert.ok(remote.stdout.indexOf('选择操作 [1-3，默认 1]: 2')<remote.stdout.indexOf('下载云响：'));
   }finally{rmSync(dir,{recursive:true,force:true});}
 });
 test('one-click build failure does not report success or remove saved configuration',{skip:!available},()=>{
