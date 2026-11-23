@@ -60,6 +60,24 @@ test('missing external network is recovered from the current NewAPI container', 
   assert.equal(setNetwork(compose, 'explicit-net').compose.services.compensation.network_mode, 'explicit-net');
 });
 
+test('migration helpers read compose from stdin instead of the container filesystem', { skip: !bashAvailable }, () => {
+  const dir = setup();
+  try {
+    const compose = composePlan({ network: 'host', port: 3210 });
+    const script = spawnSync(bash, ['-lc', 'node "$@"', process.execPath, join(root, 'src', 'deployment-recovery.mjs').replaceAll('\\', '/'), 'normalize', dir.replaceAll('\\', '/')], {
+      cwd: '/',
+      encoding: 'utf8',
+      input: JSON.stringify(compose)
+    });
+    assert.equal(script.status, 0, script.stdout + script.stderr);
+    const output = JSON.parse(script.stdout);
+    assert.equal(output.compose.name, 'newapi-compensation');
+    assert.equal(output.compose.services.compensation.network_mode, 'host');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('migrated compose regenerates the panel file without stale absolute paths', { skip: !bashAvailable }, () => {
   const dir = setup();
   try {

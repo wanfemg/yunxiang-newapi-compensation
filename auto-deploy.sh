@@ -138,7 +138,7 @@ if [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.js
     mv -- compose.generated.json.pending compose.generated.json
     echo "已修复迁移带来的绝对路径：$recovery_changes"
   fi
-  network=$(node_tool --input-type=module -e 'import fs from "node:fs";console.log(JSON.parse(fs.readFileSync("compose.generated.json","utf8")).services.compensation.network_mode)')
+  network=$(node_tool --input-type=module -e 'import fs from "node:fs";console.log(JSON.parse(fs.readFileSync(0,"utf8")).services.compensation.network_mode)' < compose.generated.json)
   if [[ $network != host ]]; then
     if ! docker network inspect "$network" >/dev/null 2>&1; then
       echo "外部网络 $network 不存在，正在按当前 云中猫API小站 容器重新识别。"
@@ -158,7 +158,7 @@ if [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.js
       if [[ -n $inspected ]]; then
         recovered=$(node_tool src/deployment-recovery.mjs network < compose.generated.json "$inspected" "${NEWAPI_NETWORK:-}" 2>/dev/null || true)
       elif [[ -n ${NEWAPI_NETWORK:-} ]]; then
-        recovered=$(node_tool src/deployment-recovery.mjs set-network < compose.generated.json "${NEWAPI_NETWORK:-}" 2>/dev/null || true)
+        recovered=$(node_tool src/deployment-recovery.mjs set-network "${NEWAPI_NETWORK:-}" < compose.generated.json 2>/dev/null || true)
       fi
       if [[ -z $recovered ]]; then
         echo '无法唯一识别新服务器上的 云中猫API小站 网络。'
