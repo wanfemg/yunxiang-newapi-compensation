@@ -43,13 +43,15 @@ fi
 # Read prompts from the terminal so both process substitution and curl pipes work.
 prompt(){
   local label=$1 default=$2 answer=''
-  if [[ $non_interactive == 0 && -r /dev/tty && -w /dev/tty ]]; then
+  if [[ $non_interactive == 0 && -n ${YUNXIANG_TEST_PROMPTS:-} ]]; then
+    printf '%s' "$label" >&2
+    IFS= read -r answer || { echo '交互输入已结束。'; exit 1; }
+  elif [[ $non_interactive == 0 && -r /dev/tty && -w /dev/tty ]]; then
     printf '%s' "$label" > /dev/tty
     IFS= read -r answer < /dev/tty || { echo '交互输入已结束。'; exit 1; }
   fi
   REPLY=${answer:-$default}
 }
-[[ $(uname -s) == Linux ]] || { echo '自动部署用于 Linux 服务器。'; exit 1; }
 command -v docker >/dev/null || { echo '需要 Docker Engine 与 Compose v2。'; exit 1; }
 docker info >/dev/null
 docker compose version >/dev/null
@@ -123,7 +125,8 @@ else
   valid_port "$app_port" || { echo '端口无效。'; exit 1; }
   app_port=$((10#$app_port))
   if command -v ss >/dev/null && ss -H -ltn | awk '{print $4}' | grep -Eq ":$app_port$"; then echo '端口已被使用，重新运行并选择空闲端口。'; exit 1; fi
-  prompt "云响 HTTPS 域名 [http://127.0.0.1:$app_port]: " "${PUBLIC_ORIGIN:-http://127.0.0.1:$app_port}"; origin=${REPLY%/}
+  prompt "云响 HTTPS 域名（可输入 yx.example.com，自动使用 https://） [http://127.0.0.1:$app_port]: " "${PUBLIC_ORIGIN:-http://127.0.0.1:$app_port}"; origin=${REPLY%/}
+  if [[ $origin =~ ^[a-zA-Z0-9.-]+(:[0-9]+)?$ ]]; then origin="https://$origin"; fi
   [[ $origin =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?$ || $origin == "http://127.0.0.1:$app_port" ]] || { echo '域名须为不带路径的 HTTPS 地址。'; exit 1; }
   admin_id=${NEWAPI_ADMIN_USER_ID:-}
   if [[ -z $admin_id ]]; then prompt '云中猫API小站 站长用户 ID: ' ''; admin_id=$REPLY; fi

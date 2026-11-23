@@ -104,6 +104,12 @@ if [[ ${1:-} == uninstall.sh || ${1:-} == --uninstall ]]; then
   exec bash "${BASH_SOURCE[0]%/*}/../uninstall.sh" "$@"
 fi
 if (($# == 0)); then
+  if [[ -n ${YUNXIANG_TEST_PROMPTS:-} ]]; then
+    exec bash auto-deploy.sh "$@"
+  fi
   exec bash auto-deploy.sh --non-interactive
+fi
+if [[ -n ${YUNXIANG_TEST_PROMPTS:-} ]]; then
+  exec bash auto-deploy.sh "$@"
 fi
 exec bash auto-deploy.sh --non-interactive "$@"

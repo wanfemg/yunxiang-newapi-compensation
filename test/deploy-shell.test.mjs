@@ -87,6 +87,16 @@ test('deployment entry supports explicit update migrate and reinstall modes',{sk
     assert.equal(readFileSync(join(dir,'.env.auto'),'utf8'),env);
   }finally{rmSync(dir,{recursive:true,force:true});}
 });
+test('deployment normalizes bare public origin domains to https',{skip:!available},()=>{
+  const dir=setup();
+  try{
+    const answer=join(dir,'origin-answer');
+    writeFileSync(answer,'3210\nyx.yzmao.cn\n');
+    const result=spawnSync(bash,['-lc','source "$1" --update < "$2"','--',toMsys(harness),toMsys(answer)],{cwd:dir,encoding:'utf8',timeout:30000,env:{...process.env,NODE_EXE:process.execPath.replaceAll('\\','/'),NEWAPI_URL:'https://newapi.example.com',NEWAPI_ADMIN_USER_ID:'1',NEWAPI_ADMIN_TOKEN:'fixture-deploy-token',COMPENSATION_PORT:'3210',YUNXIANG_TEST_PROMPTS:'1',MOCK_DOCKER_LOG:toMsys(join(dir,'docker.log'))}});
+    assert.equal(result.status,0,result.stdout+result.stderr);
+    assert.match(readFileSync(join(dir,'.env.auto'),'utf8'),/^PUBLIC_ORIGIN=https:\/\/yx\.yzmao\.cn$/m);
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
 test('one-click installer prompts before downloading an existing deployment',{skip:!available},()=>{
   const dir=setup();
   try{
