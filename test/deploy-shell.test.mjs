@@ -97,6 +97,16 @@ test('deployment normalizes bare public origin domains to https',{skip:!availabl
     assert.match(readFileSync(join(dir,'.env.auto'),'utf8'),/^PUBLIC_ORIGIN=https:\/\/yx\.yzmao\.cn$/m);
   }finally{rmSync(dir,{recursive:true,force:true});}
 });
+test('first installation may create a new ledger volume without migration data',{skip:!available},()=>{
+  const dir=setup();
+  try{
+    const result=run(dir,{MOCK_VOLUME_MISSING:'1'});
+    assert.equal(result.status,0,result.stdout+result.stderr);
+    assert.match(result.stdout,/首次安装：允许创建新的持久账本数据卷/);
+    assert.doesNotMatch(result.stdout+result.stderr,/不会新建空账本/);
+    assert.match(result.stdout,/云响已启动/);
+  }finally{rmSync(dir,{recursive:true,force:true});}
+});
 test('one-click installer prompts before downloading an existing deployment',{skip:!available},()=>{
   const dir=setup();
   try{

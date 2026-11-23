@@ -62,6 +62,10 @@ exec 9>.yunxiang-deploy.lock
 flock -n 9 || { echo '已有云响部署正在运行。'; exit 1; }
 mkdir -p secrets
 chmod 700 secrets
+first_install=1
+if [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.json ]]; then
+  first_install=0
+fi
 node_tool(){ docker run --rm -i --network none --read-only --cap-drop ALL --security-opt no-new-privileges --mount "type=bind,src=$PWD/src,dst=/app/src,readonly" -w /app node:24-bookworm-slim node "$@"; }
 json_get(){ node_tool --input-type=module -e 'import fs from "node:fs";let x=JSON.parse(fs.readFileSync(0,"utf8"));for(const k of process.argv[1].split("."))x=x?.[k];process.stdout.write(typeof x==="object"?JSON.stringify(x):String(x??""));' "$1"; }
 valid_port(){ [[ $1 =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
@@ -156,6 +160,12 @@ if [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.js
       fi
     fi
     if [[ -z $recovery_source || ! -s $recovery_source/compensation.sqlite ]]; then
+      if (( first_install )); then
+        echo '首次安装：允许创建新的持久账本数据卷。'
+        [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"
+        recovery_source=''
+        recovery_temp=''
+      else
       echo '新服务器缺少持久账本数据卷 newapi-compensation_compensation_data，且未找到可恢复的账本备份。'
       echo '云响不会新建空账本冒充迁移成功。请保留以下任一来源后重试：'
       echo '  1. 当前目录 data/compensation.sqlite（含同目录 WAL/SHM 文件）'
@@ -163,24 +173,29 @@ if [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.js
       echo '  3. 旧服务器 bash migrate.sh export yunxiang-migration.tar.gz，本机 bash migrate.sh import yunxiang-migration.tar.gz'
       [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"
       exit 1
+      fi
+    else
+      first_install=0
     fi
-    if ! node_tool --input-type=module -e 'import fs from "node:fs";const b=fs.readFileSync(process.argv[1]);process.exit(b.subarray(0,15).toString("latin1")==="SQLite format 3"?0:1)' "$recovery_source/compensation.sqlite"; then
+    if [[ -n $recovery_source ]] && ! node_tool --input-type=module -e 'import fs from "node:fs";const b=fs.readFileSync(process.argv[1]);process.exit(b.subarray(0,15).toString("latin1")==="SQLite format 3"?0:1)' "$recovery_source/compensation.sqlite"; then
       echo '账本备份不是有效 SQLite 文件，已停止启动。'
       [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"
       exit 1
     fi
-    docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges \
-      -v "$recovery_source:/restore:ro" -v "$volume:/data:rw" -w /data \
-      node:24-bookworm-slim sh -c 'chown -R 1000:1000 /data && chmod 700 /data && chmod 600 /data/compensation.sqlite 2>/dev/null || true && chmod 600 /data/compensation.sqlite-wal /data/compensation.sqlite-shm 2>/dev/null || true'
-    if [[ -f $recovery_source/compensation.sqlite ]]; then :; else
-      echo '账本恢复失败：未找到 SQLite 主文件。'
+    if [[ -n $recovery_source ]]; then
+      docker run --rm --network none --user 0:0 --cap-drop ALL --security-opt no-new-privileges \
+        -v "$recovery_source:/restore:ro" -v "$volume:/data:rw" -w /data \
+        node:24-bookworm-slim sh -c 'chown -R 1000:1000 /data && chmod 700 /data && chmod 600 /data/compensation.sqlite 2>/dev/null || true && chmod 600 /data/compensation.sqlite-wal /data/compensation.sqlite-shm 2>/dev/null || true'
+      if [[ -f $recovery_source/compensation.sqlite ]]; then :; else
+        echo '账本恢复失败：未找到 SQLite 主文件。'
+        [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"
+        exit 1
+      fi
+      docker volume inspect "$volume" >/dev/null
+      echo "已恢复持久账本数据卷：$volume"
       [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"
-      exit 1
+      unset recovery_source recovery_temp
     fi
-    docker volume inspect "$volume" >/dev/null
-    echo "已恢复持久账本数据卷：$volume"
-    [[ -n ${recovery_temp:-} ]] && rm -rf -- "$recovery_temp"
-    unset recovery_source recovery_temp
   fi
   recovery=$(node_tool src/deployment-recovery.mjs normalize "$PWD" < compose.generated.json)
   recovery_changes=$(printf '%s' "$recovery" | node_tool --input-type=module -e 'import fs from "node:fs";console.log(JSON.parse(fs.readFileSync(0,"utf8")).changes.join(","))')
