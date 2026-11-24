@@ -3,7 +3,11 @@ import { pathToFileURL } from 'node:url';
 import { discoverDatabase } from './db-discovery.mjs';
 
 export function candidates(containers) {
-  return containers.filter(c => c.State?.Running && /(^|[\s/_.-])(new-?api|one-?api)([:/_.\s-]|$)/i.test([c.Name,c.Config?.Image,c.Path,...(c.Args||[])].join(' ')));
+  return containers.filter(c => c.State?.Running &&
+    c.Config?.Labels?.['com.docker.compose.project'] !== 'newapi-compensation' &&
+    !/(^|[/_.-])(?:yunxiang-newapi-compensation|newapi-compensation)(?:[:/_.-]|$)/i.test(c.Config?.Image || '') &&
+    String(c.Name).replace(/^\//, '') !== 'yunxiang-compensation' &&
+    /(^|[\s/_.-])(new-?api|one-?api)([:/_.\s-]|$)/i.test([c.Name,c.Config?.Image,c.Path,...(c.Args||[])].join(' ')));
 }
 export function deploymentPlan(container, options = {}) {
   if (!container) return {mode:'host',network:'host',url:options.url||'http://127.0.0.1:3000',database:{version:1,connected:false,mode:'api',main:{type:'unknown'},logs:{type:'unknown'}}};
@@ -17,6 +21,7 @@ export function deploymentPlan(container, options = {}) {
   catch {database={version:1,container:name,connected:false,mode:'api',main:{type:'unknown'},logs:{type:'unknown'}};}
   if(container.HostConfig?.NetworkMode==='host')return {mode:'docker-host',network:'host',url:`http://127.0.0.1:${port}`,database};
   const networks=Object.entries(container.NetworkSettings?.Networks||{}).filter(([key])=>!['bridge','host','none'].includes(key));
+  if (!options.network && networks.length > 1) throw Error('原站连接多个网络；设置 NEWAPI_NETWORK 选择已连接的网络');
   const network=options.network||networks[0]?.[0];
   if (!network) {
     const bindings=container.NetworkSettings?.Ports?.[`${port}/tcp`]||[];

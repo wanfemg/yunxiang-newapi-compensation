@@ -6,12 +6,16 @@ const container=(overrides={})=>({Name:'/new-api',State:{Running:true},Config:{I
 
 test('deployment discovery only selects running 云中猫API小站/OneAPI containers',()=>{
   assert.equal(candidates([container(),container({State:{Running:false}}),container({Name:'/redis',Config:{Image:'redis:7'}})]).length,1);
+  for (const image of ['yunxiang-newapi-compensation:local', 'newapi-compensation:local']) {
+    assert.equal(candidates([container({Name:'/yunxiang-compensation',Config:{Image:image}})]).length,0);
+  }
 });
 test('deployment detects Compose bridge and honors explicit network and port',()=>{
   const c=container({Config:{Env:['PORT=3001'],Labels:{'com.docker.compose.project':'newapi'}},NetworkSettings:{Networks:{private_net:{},newapi_default:{}}}});
   const p=deploymentPlan(c,{network:'newapi_default',port:3002});
   assert.equal(p.mode,'docker-compose');assert.equal(p.network,'newapi_default');assert.equal(p.url,'http://new-api:3002');
   assert.throws(()=>deploymentPlan(c,{network:'not-attached'}));
+  assert.throws(()=>deploymentPlan(c),/多个网络/);
 });
 test('deployment detects host and remote API modes',()=>{
   assert.equal(deploymentPlan(container({HostConfig:{NetworkMode:'host'}})).url,'http://127.0.0.1:3000');

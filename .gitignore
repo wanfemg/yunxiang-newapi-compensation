@@ -3,6 +3,9 @@
 .env.auto
 .env.auto.pending
 .yunxiang-deploy.lock
+.yunxiang-deploy-state
+.yunxiang-deploy-state.pending
+.yunxiang-config.pending/
 compose.generated.json
 compose.generated.json.pending
 docker-compose.yml

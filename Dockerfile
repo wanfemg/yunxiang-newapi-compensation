@@ -6,7 +6,8 @@ COPY src ./src
 COPY public ./public
 COPY test ./test
 COPY *.sh ./
-COPY Dockerfile .dockerignore ./
+COPY Dockerfile .dockerignore .gitattributes README.md ./
+COPY docs/one-click.md ./docs/one-click.md
 RUN node --test test/*.test.mjs
 
 FROM node:24-bookworm-slim AS runtime

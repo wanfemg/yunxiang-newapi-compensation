@@ -24,7 +24,7 @@ test('Docker test stage includes shell fixtures in build context and COPY', () =
 
 test('SMTP 依赖锁随一键安装校验、路径检查、源码复制与 Docker 构建分发', () => {
   const root=join(import.meta.dirname,'..'),installer=readFileSync(join(root,'install.sh'),'utf8');
-  const lists=installer.split('\n').filter(line=>line.startsWith('for item in '));
+  const lists=installer.split('\n').filter(line=>line.trimStart().startsWith('for item in '));
   assert.equal(lists.length,3);for(const line of lists)assert.ok(line.includes('package-lock.json'));
   assert.match(readFileSync(join(root,'.dockerignore'),'utf8'),/^!package-lock[.]json$/m);
   const dockerfile=readFileSync(join(root,'Dockerfile'),'utf8');assert.match(dockerfile,/npm ci --omit=dev/);assert.match(dockerfile,/COPY --from=test[^\n]+node_modules/);

@@ -1,116 +1,99 @@
 #!/usr/bin/env bash
 set -euo pipefail
 umask 077
-if [[ ${1:-} == --help || ${1:-} == -h ]]; then
-  printf '%s\n' '云响一键部署：bash install.sh [--non-interactive|--update|--migrate|--reinstall|--uninstall|--yes]' \
-    '安装目录：YUNXIANG_INSTALL_DIR（默认 /opt/yunxiang）' \
-    '源码仓库：YUNXIANG_REPO（默认 wanfemg/yunxiang-newapi-compensation）' \
-    '分支或标签：YUNXIANG_REF（默认 main）' \
-    '首次配置：NEWAPI_URL 或 NEWAPI_CONTAINER、NEWAPI_ADMIN_USER_ID、NEWAPI_ADMIN_TOKEN_FILE、PUBLIC_ORIGIN' \
-    '可选配置：COMPENSATION_PORT、NEWAPI_PORT、NEWAPI_NETWORK' \
-    '部署模式：已有部署交互选择更新/迁移修复/重新安装/彻底卸载；无人值守默认 update' \
-    '环境变量：YUNXIANG_DEPLOY_MODE=update|migrate|reinstall|uninstall' \
-    '跨服务器迁移：旧服务器 bash migrate.sh export <包>；新服务器 bash migrate.sh import <包>'
-  exit 0
-fi
-[[ $(uname -s) == Linux ]] || { echo '一键部署入口用于 Linux 服务器。'; exit 1; }
-mode_args=()
-explicit_mode=0
-uninstall_args=()
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --non-interactive|--update|--migrate|--reinstall) mode_args+=("$1"); explicit_mode=1; shift; continue ;;
-    --uninstall) selected_mode=uninstall; explicit_mode=1; shift; continue ;;
-    --yes) uninstall_args+=(--yes); shift; continue ;;
-    --mode)
-      [[ -n ${2:-} ]] || { echo '--mode 需要参数：update、migrate、reinstall 或 uninstall。'; exit 1; }
-      mode_args+=(--mode "$2"); explicit_mode=1; shift 2; continue
-      ;;
-    *) break ;;
-  esac
-done
-(( $# == 0 )) || { echo "未知参数：$*"; exit 1; }
-target=${YUNXIANG_INSTALL_DIR:-/opt/yunxiang}
-selected_mode=${YUNXIANG_DEPLOY_MODE:-}
-if [[ $selected_mode == update || $selected_mode == migrate || $selected_mode == reinstall || $selected_mode == uninstall ]]; then explicit_mode=1; fi
-if [[ $selected_mode != uninstall ]]; then
-  mkdir -p -- "$target"
-fi
-if [[ -d $target ]]; then
-  target=$(cd -- "$target" && pwd -P)
-fi
-if (( explicit_mode == 0 )) && [[ -s $target/.env.auto && -s $target/compose.generated.json && -s $target/secrets/newapi_database.json ]]; then
-  cat >&2 <<'EOF'
-检测到已有云响部署。请选择操作：
-1. 更新（默认）：下载最新源码并重建启动，保留数据卷、secrets 和接入配置
-2. 迁移修复：检查迁移路径、外部网络和持久账本，适合新服务器启动异常
-3. 重新安装：删除旧容器后重建，保留数据卷、secrets 和接入配置
-4. 彻底卸载：停止并删除云响容器、镜像、账本数据卷、secrets 和安装目录；不修改 云中猫API小站
-EOF
-  choice=1
-  if [[ -r /dev/stdin && -w /dev/stdin ]]; then
-    printf '%s' '选择操作 [1-4，默认 1]: '
-    IFS= read -r choice || choice=1
-  else
-    echo '无法读取交互输入；使用 --update、--migrate、--reinstall、--uninstall 或设置 YUNXIANG_DEPLOY_MODE。'
-    exit 1
-  fi
-  case ${choice:-1} in
-    1) selected_mode=update ;;
-    2) selected_mode=migrate ;;
-    3) selected_mode=reinstall ;;
-    4) selected_mode=uninstall ;;
-    *) echo '选项无效。'; exit 1 ;;
-  esac
-fi
-if [[ $selected_mode == migrate ]]; then mode_args+=(--non-interactive); fi
-if [[ -n $selected_mode && $selected_mode != update ]]; then mode_args+=(--mode "$selected_mode"); fi
-if [[ $selected_mode == uninstall ]]; then
-  mode_args=()
-  if [[ -f $target/uninstall.sh ]]; then
-    exec bash "$target/uninstall.sh" "${uninstall_args[@]}"
-  fi
-  script_dir=
-  [[ -n ${BASH_SOURCE[0]:-} ]] && script_dir=$(dirname -- "${BASH_SOURCE[0]}")
-  if [[ -n $script_dir && -f $script_dir/uninstall.sh ]]; then
-    exec bash "$script_dir/uninstall.sh" "${uninstall_args[@]}"
-  fi
-fi
-if [[ -n ${BASH_SOURCE[0]:-} && -f $(dirname -- "${BASH_SOURCE[0]}")/auto-deploy.sh ]]; then
-  cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-  exec bash auto-deploy.sh "${mode_args[@]}"
-fi
-command -v curl >/dev/null && command -v tar >/dev/null || { echo '需要 curl 与 tar。'; exit 1; }
+[[ $(uname -s) == Linux ]] || { echo '一键部署入口用于 Linux 服务器。' >&2; exit 1; }
+
 repo=${YUNXIANG_REPO:-wanfemg/yunxiang-newapi-compensation}
 ref=${YUNXIANG_REF:-main}
-[[ $repo =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ && $ref =~ ^[a-zA-Z0-9_.-]+$ ]] || { echo '仓库或版本格式无效。'; exit 1; }
-[[ $target != / && $target != /opt && $target != /home ]] || { echo '使用专属安装目录。'; exit 1; }
-stage=$(mktemp -d /tmp/yunxiang-install.XXXXXX)
-trap 'rm -rf -- "$stage"' EXIT
-echo "下载云响：$repo @ $ref（部署模式：${selected_mode:-update}）"
-curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 300 "https://api.github.com/repos/$repo/tarball/$ref" -o "$stage/source.tar.gz"
-if tar -tzf "$stage/source.tar.gz" | awk '/^\// || /(^|\/)\.\.(\/|$)/ {bad=1} END {exit !bad}'; then echo '压缩包路径不安全。'; exit 1; fi
-tar -xzf "$stage/source.tar.gz" -C "$stage" --no-same-owner --no-same-permissions
-[[ -z $(find "$stage" -type l -print -quit) ]] || { echo '发布包包含符号链接，未修改现有安装。'; exit 1; }
-source_dir=$(find "$stage" -maxdepth 3 -type f -name auto-deploy.sh -print)
-[[ -n $source_dir && $source_dir != *$'\n'* ]] || { echo '下载版本不包含唯一的云响部署入口，未修改现有安装。'; exit 1; }
-source_dir=$(dirname -- "$source_dir")
-# Normalize downloaded scripts too: archives from older releases may use CRLF.
-while IFS= read -r -d '' script; do sed -i 's/\r$//' "$script"; done < <(find "$source_dir" -type f -name '*.sh' -print0)
-sed -i 's/\r$//' "$source_dir/Dockerfile"
-for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh install.sh status.sh migrate.sh uninstall.sh README.md; do
-  [[ -e $source_dir/$item ]] || { echo "发布包缺少 $item"; exit 1; }
-done
-for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh install.sh status.sh migrate.sh uninstall.sh README.md; do
-  [[ ! -L $target/$item ]] || { echo "安装路径是符号链接：$item"; exit 1; }
-done
-for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh install.sh status.sh migrate.sh uninstall.sh README.md; do cp -R -- "$source_dir/$item" "$target/"; done
-mkdir -p -- "$target/docs"
-[[ ! -L $target/docs ]] || { echo '文档目录是符号链接。'; exit 1; }
-[[ ! -f $source_dir/docs/one-click.md ]] || cp -- "$source_dir/docs/one-click.md" "$target/docs/one-click.md"
-cd -- "$target"
-echo "云响源码已安装：$target（数据卷、secrets 和部署配置均保留）"
-if [[ $selected_mode == uninstall ]]; then
-  exec bash "$target/uninstall.sh" "${uninstall_args[@]}"
+[[ $repo =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ && $ref =~ ^[a-zA-Z0-9_.-]+$ ]] || {
+  echo '仓库或版本格式无效。' >&2; exit 1;
+}
+script_dir=''
+if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} ]]; then
+  script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 fi
-bash auto-deploy.sh "${mode_args[@]}"
+stage=''
+cleanup(){ [[ -z $stage ]] || rm -rf -- "$stage"; }
+trap cleanup EXIT
+download(){
+  command -v curl >/dev/null || { echo '需要 curl。' >&2; exit 1; }
+  curl --fail --show-error --silent --location --proto '=https' --proto-redir '=https' \
+    --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 300 "$1" -o "$2"
+}
+local_source=''
+if [[ -n $script_dir && -f $script_dir/auto-deploy.sh && -f $script_dir/deploy-runtime.sh ]]; then
+  local_source=$script_dir
+  source "$script_dir/deploy-runtime.sh"
+else
+  stage=$(mktemp -d /tmp/yunxiang-install.XXXXXX)
+  download "https://raw.githubusercontent.com/$repo/$ref/deploy-runtime.sh" "$stage/deploy-runtime.sh"
+  sed -i 's/\r$//' "$stage/deploy-runtime.sh"
+  source "$stage/deploy-runtime.sh"
+fi
+yx_parse_args "$@"
+yx_validate_target "${YUNXIANG_INSTALL_DIR:-${local_source:-/opt/yunxiang}}"
+target=$REPLY
+export YUNXIANG_INSTALL_DIR=$target
+yx_select_mode
+
+if [[ $yx_mode == uninstall ]]; then
+  # Fetch only the uninstaller; never replace an installation before deleting it.
+  uninstaller=${local_source:+$local_source/uninstall.sh}
+  if [[ -z $uninstaller || ! -f $uninstaller ]]; then
+    [[ -n $stage ]] || stage=$(mktemp -d /tmp/yunxiang-install.XXXXXX)
+    uninstaller=$stage/uninstall.sh
+    download "https://raw.githubusercontent.com/$repo/$ref/uninstall.sh" "$uninstaller"
+    sed -i 's/\r$//' "$uninstaller"
+  fi
+  args=()
+  ((yx_yes == 0)) || args+=(--yes)
+  ((yx_non_interactive == 0)) || args+=(--non-interactive)
+  cd /
+  bash "$uninstaller" "${args[@]}"
+  exit $?
+fi
+((yx_yes == 0)) || yx_die '--yes 只用于确认卸载；安装与更新不需要该选项。'
+
+source_dir=$local_source
+if [[ -z $source_dir ]]; then
+  command -v tar >/dev/null || yx_die '需要 tar。'
+  [[ -n $stage ]] || stage=$(mktemp -d /tmp/yunxiang-install.XXXXXX)
+  echo "下载云响：$repo @ $ref（部署模式：$yx_mode）"
+  download "https://api.github.com/repos/$repo/tarball/$ref" "$stage/source.tar.gz"
+  tar -tzf "$stage/source.tar.gz" > "$stage/members"
+  if awk '/^\// || /(^|\/)\.\.(\/|$)/ {bad=1} END {exit !bad}' "$stage/members"; then
+    yx_die '压缩包路径不安全，未修改现有安装。'
+  fi
+  if tar -tvzf "$stage/source.tar.gz" | awk 'substr($0,1,1)!="-" && substr($0,1,1)!="d" {bad=1} END {exit !bad}'; then
+    yx_die '发布包含链接或特殊文件，未修改现有安装。'
+  fi
+  mkdir "$stage/source"
+  tar -xzf "$stage/source.tar.gz" -C "$stage/source" --no-same-owner --no-same-permissions
+  source_dir=$(find "$stage/source" -mindepth 2 -maxdepth 2 -type f -name auto-deploy.sh -print)
+  [[ -n $source_dir && $source_dir != *$'\n'* ]] || yx_die '发布包缺少唯一的云响部署入口。'
+  source_dir=$(dirname -- "$source_dir")
+  while IFS= read -r -d '' script; do sed -i 's/\r$//' "$script"; done < <(find "$source_dir" -type f -name '*.sh' -print0)
+  sed -i 's/\r$//' "$source_dir/Dockerfile"
+fi
+for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh deploy-runtime.sh install.sh status.sh migrate.sh uninstall.sh README.md; do
+  [[ -e $source_dir/$item ]] || yx_die "发布包缺少 $item，未修改现有安装。"
+done
+yx_acquire_lock "$target"
+mkdir -p -- "$target"
+for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh deploy-runtime.sh install.sh status.sh migrate.sh uninstall.sh README.md; do
+  [[ ! -L $target/$item ]] || yx_die "安装路径是符号链接：$item"
+  if [[ -d $target/$item && -n $(find "$target/$item" -type l -print -quit) ]]; then
+    yx_die "安装目录含符号链接：$item"
+  fi
+done
+if [[ $source_dir != "$target" ]]; then
+  for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh deploy-runtime.sh install.sh status.sh migrate.sh uninstall.sh README.md; do cp -R -- "$source_dir/$item" "$target/"; done
+  [[ ! -L $target/docs ]] || yx_die '文档目录是符号链接。'
+  mkdir -p -- "$target/docs"
+  [[ ! -L $target/docs/one-click.md ]] || yx_die '部署说明是符号链接。'
+  [[ ! -f $source_dir/docs/one-click.md ]] || cp -- "$source_dir/docs/one-click.md" "$target/docs/one-click.md"
+fi
+args=(--mode "$yx_mode")
+((yx_non_interactive == 0)) || args+=(--non-interactive)
+echo "云响源码已就绪：$target（保留账本、secrets 和接入配置）"
+YUNXIANG_PARENT_LOCK_FD=$yx_lock_fd bash "$target/auto-deploy.sh" "${args[@]}"

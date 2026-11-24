@@ -1,202 +1,257 @@
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,cpSync,readFileSync,writeFileSync,rmSync,existsSync} from 'node:fs';
-import {tmpdir} from 'node:os';
-import {mkdirSync} from 'node:fs';
-import {join,resolve} from 'node:path';
-import {spawnSync} from 'node:child_process';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { deployFixture, bashAvailable } from './deploy-fixture.mjs';
 
-const bash=process.env.BASH_PATH||(process.platform==='win32'?'C:/Program Files/Git/bin/bash.exe':'bash');
-const available=spawnSync(bash,['--version'],{encoding:'utf8'}).status===0;
-const root=resolve(import.meta.dirname,'..');
-const harness=join(import.meta.dirname,'deploy-harness.sh').replaceAll('\\','/');
-const toMsys=path=>path.replaceAll('\\','/').replace(/^([A-Za-z]):/,(_,drive)=>`/${drive.toLowerCase()}`);
-const remotePackage=(dir)=>{
-  const source=join(dir,'remote-source');
-  mkdirSync(source,{recursive:true});
-  for(const file of ['src','public','test','Dockerfile','.dockerignore','.gitattributes','package.json','package-lock.json','auto-deploy.sh','install.sh','status.sh','migrate.sh','uninstall.sh','README.md'])cpSync(join(root,file),join(source,file),{recursive:true});
-  const archive=join(dir,'yunxiang-source.tar.gz');
-  const tar=spawnSync(bash,['-lc','tar -czf "$1" -C "$2" remote-source','--',toMsys(archive),toMsys(dir)],{cwd:dir,encoding:'utf8'});
-  assert.equal(tar.status,0,tar.stdout+tar.stderr);
-  const answer=join(dir,'one-click-answer');
-  writeFileSync(answer,'2\n');
-  const installer=join(dir,'installer');
-  mkdirSync(installer,{recursive:true});
-  cpSync(join(root,'install.sh'),join(installer,'install.sh'));
-  cpSync(join(root,'test','deploy-harness.sh'),join(installer,'deploy-harness.sh'));
-  return {archive,answer,installer};
-};
-const setup=()=>{
-  const dir=mkdtempSync(join(tmpdir(),'yunxiang-deploy-'));
-  for(const file of ['auto-deploy.sh','install.sh','uninstall.sh','src'])cpSync(join(root,file),join(dir,file),{recursive:true});
-  return dir;
-};
-const run=(dir,extra={})=>spawnSync(bash,[harness],{cwd:dir,encoding:'utf8',timeout:30000,env:{...process.env,NODE_EXE:process.execPath.replaceAll('\\','/'),NEWAPI_URL:'https://newapi.example.com',NEWAPI_ADMIN_USER_ID:'1',NEWAPI_ADMIN_TOKEN:'fixture-deploy-token',PUBLIC_ORIGIN:'https://refund.example.com',COMPENSATION_PORT:'3210',...extra}});
-const runMode=(dir,mode,extra={})=>spawnSync(bash,[harness,mode],{cwd:dir,encoding:'utf8',timeout:30000,env:{...process.env,NODE_EXE:process.execPath.replaceAll('\\','/'),NEWAPI_URL:'https://newapi.example.com',NEWAPI_ADMIN_USER_ID:'1',NEWAPI_ADMIN_TOKEN:'fixture-deploy-token',PUBLIC_ORIGIN:'https://refund.example.com',COMPENSATION_PORT:'3210',...extra}});
-const runUninstall=(dir,mode,extra={})=>spawnSync(bash,[harness,mode],{cwd:dir,encoding:'utf8',timeout:30000,env:{...process.env,NODE_EXE:process.execPath.replaceAll('\\','/'),MOCK_DOCKER_LOG:toMsys(join(dir,'docker.log')),MOCK_UNINSTALL_CONTAINERS:'1',YUNXIANG_INSTALL_DIR:dir,NEWAPI_URL:'https://newapi.example.com',NEWAPI_ADMIN_USER_ID:'1',NEWAPI_ADMIN_TOKEN:'fixture-deploy-token',PUBLIC_ORIGIN:'https://refund.example.com',COMPENSATION_PORT:'3210',...extra}});
+const ok = result => assert.equal(result.status, 0, result.stdout + result.stderr);
+const output = result => result.stdout + result.stderr;
+const initialized = fixture => ok(fixture.run());
+const callsWith = (fixture, verb) => fixture.calls().filter(call => call[0] === 'compose' && call.includes(verb));
+const ledger = fixture => join(fixture.volume, 'compensation.sqlite');
 
-test('one-click shell writes first-run config and reuses it on updates',{skip:!available},()=>{
-  const dir=setup();
-  try{
-    const first=run(dir);assert.equal(first.status,0,first.stdout+first.stderr);
-    const env=readFileSync(join(dir,'.env.auto'),'utf8');
-    assert.match(env,/NEWAPI_URL=https:\/\/newapi.example.com/);assert.doesNotMatch(first.stdout+first.stderr,/fixture-deploy-token/);
-    assert.equal(readFileSync(join(dir,'secrets/newapi_admin_token'),'utf8'),'fixture-deploy-token');
-    const next=run(dir,{NEWAPI_URL:'https://wrong.example.com',NEWAPI_ADMIN_USER_ID:'2'});
-    assert.equal(next.status,0,next.stdout+next.stderr);
-    assert.equal(readFileSync(join(dir,'.env.auto'),'utf8'),env);
-    const compose=JSON.parse(readFileSync(join(dir,'compose.generated.json'),'utf8'));
-    assert.deepEqual(compose.services.compensation.volumes,['compensation_data:/app/data']);
-    assert.equal(compose.services.compensation.image,'yunxiang-newapi-compensation:local');
-    assert.equal(compose.services.compensation.container_name,'yunxiang-compensation');
-    assert.equal(compose.volumes.compensation_data.name,'newapi-compensation_compensation_data');
-    const exported=JSON.parse(readFileSync(join(dir,'docker-compose.yml'),'utf8'));
-    assert.equal(exported.services.compensation.build.context,dir);
-    assert.match(exported.secrets.newapi_admin_token.file,/newapi_admin_token$/);
-    assert.match(next.stdout,/docker-compose.yml/);
-  }finally{rmSync(dir,{recursive:true,force:true});}
+describe('deployment shell workflows', { concurrency: 4 }, () => {
+test('fresh installation creates its own volume and persists a completed deployment', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    assert.equal(existsSync(f.volume), false);
+    const result = f.run(); ok(result);
+    assert.equal(existsSync(ledger(f)), true);
+    assert.match(readFileSync(join(f.directory, '.yunxiang-deploy-state'), 'utf8'), /ready/);
+    assert.doesNotMatch(output(result), /fixture-deploy-token/);
+    assert.equal(readFileSync(join(f.directory, 'secrets/newapi_admin_token'), 'utf8'), 'fixture-deploy-token');
+    const compose = JSON.parse(readFileSync(join(f.directory, 'docker-compose.yml'), 'utf8'));
+    assert.equal(compose.name, 'newapi-compensation');
+    assert.equal(compose.services.compensation.container_name, 'yunxiang-compensation');
+    assert.equal(compose.volumes.compensation_data.name, 'newapi-compensation_compensation_data');
+    assert.equal(compose.services.compensation.environment.PUBLIC_ORIGIN, 'https://refund.example.com');
+  } finally { f.clean(); }
 });
-test('legacy generated deployment migrates names without changing upstream or data volume',{skip:!available},()=>{
-  const dir=setup();
-  try{
-    assert.equal(run(dir).status,0);
-    const env=readFileSync(join(dir,'.env.auto'),'utf8');
-    const file=join(dir,'compose.generated.json'),old=JSON.parse(readFileSync(file,'utf8'));
-    old.services.compensation.image='newapi-compensation:local';delete old.services.compensation.container_name;old.volumes.compensation_data={};
-    writeFileSync(file,JSON.stringify(old));
-    const result=run(dir);assert.equal(result.status,0,result.stdout+result.stderr);
-    const migrated=JSON.parse(readFileSync(file,'utf8'));
-    assert.equal(migrated.services.compensation.image,'yunxiang-newapi-compensation:local');
-    assert.equal(migrated.volumes.compensation_data.name,'newapi-compensation_compensation_data');
-    assert.equal(readFileSync(join(dir,'.env.auto'),'utf8'),env);
-  }finally{rmSync(dir,{recursive:true,force:true});}
+
+test('update preserves the ledger and saved upstream configuration', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    initialized(f);
+    const env = readFileSync(join(f.directory, '.env.auto'), 'utf8');
+    const before = readFileSync(ledger(f));
+    ok(f.run('install.sh', ['--update', '--non-interactive'], { NEWAPI_URL: 'https://wrong.example.com', PUBLIC_ORIGIN: 'https://wrong.example.com' }));
+    assert.equal(readFileSync(join(f.directory, '.env.auto'), 'utf8'), env);
+    assert.deepEqual(readFileSync(ledger(f)), before);
+    const compose = JSON.parse(readFileSync(join(f.directory, 'docker-compose.yml'), 'utf8'));
+    assert.equal(compose.services.compensation.environment.NEWAPI_URL, 'https://newapi.example.com');
+    assert.equal(compose.services.compensation.environment.PUBLIC_ORIGIN, 'https://refund.example.com');
+  } finally { f.clean(); }
 });
-test('deployment entry supports explicit update migrate and reinstall modes',{skip:!available},()=>{
-  const dir=setup();
-  try{
-    assert.equal(run(dir).status,0);
-    const env=readFileSync(join(dir,'.env.auto'),'utf8');
-    const update=runMode(dir,'--migrate');
-    assert.equal(update.status,0,update.stdout+update.stderr);
-    assert.match(update.stdout,/部署模式：migrate/);
-    assert.equal(readFileSync(join(dir,'.env.auto'),'utf8'),env);
-    const reinstall=runMode(dir,'--reinstall');
-    assert.equal(reinstall.status,0,reinstall.stdout+reinstall.stderr);
-    assert.match(reinstall.stdout,/部署模式：reinstall/);
-    assert.match(reinstall.stdout,/已清理旧云响容器/);
-    assert.equal(readFileSync(join(dir,'.env.auto'),'utf8'),env);
-  }finally{rmSync(dir,{recursive:true,force:true});}
+
+test('first build failure can resume without being mistaken for lost migration data', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    const failed = f.run('auto-deploy.sh', ['--non-interactive'], { MOCK_BUILD_FAIL: '1' });
+    assert.equal(failed.status, 42, output(failed));
+    assert.doesNotMatch(output(failed), /云响已启动/);
+    assert.equal(existsSync(f.volume), false, 'build failure must occur before volume creation');
+    assert.match(readFileSync(join(f.directory, '.yunxiang-deploy-state'), 'utf8'), /pending/);
+    const retry = f.run(); ok(retry);
+    assert.equal(existsSync(ledger(f)), true);
+    assert.doesNotMatch(output(retry), /不会新建空账本/);
+  } finally { f.clean(); }
 });
-test('deployment normalizes bare public origin domains to https',{skip:!available},()=>{
-  const dir=setup();
-  try{
-    const answer=join(dir,'origin-answer');
-    writeFileSync(answer,'3210\nyx.yzmao.cn\n');
-    const result=spawnSync(bash,['-lc','source "$1" --update < "$2"','--',toMsys(harness),toMsys(answer)],{cwd:dir,encoding:'utf8',timeout:30000,env:{...process.env,NODE_EXE:process.execPath.replaceAll('\\','/'),NEWAPI_URL:'https://newapi.example.com',NEWAPI_ADMIN_USER_ID:'1',NEWAPI_ADMIN_TOKEN:'fixture-deploy-token',COMPENSATION_PORT:'3210',YUNXIANG_TEST_PROMPTS:'1',MOCK_DOCKER_LOG:toMsys(join(dir,'docker.log'))}});
-    assert.equal(result.status,0,result.stdout+result.stderr);
-    assert.match(readFileSync(join(dir,'.env.auto'),'utf8'),/^PUBLIC_ORIGIN=https:\/\/yx\.yzmao\.cn$/m);
-  }finally{rmSync(dir,{recursive:true,force:true});}
+
+test('a credential validation failure resumes initial configuration without publishing a partial deployment', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    const failed = f.run('auto-deploy.sh', ['--non-interactive'], { NEWAPI_ADMIN_TOKEN: '' });
+    assert.notEqual(failed.status, 0, output(failed));
+    assert.equal(existsSync(join(f.directory, '.env.auto')), false);
+    assert.equal(existsSync(f.volume), false);
+    const retry = f.run(); ok(retry);
+    assert.equal(existsSync(ledger(f)), true);
+    assert.equal(readFileSync(join(f.directory, 'secrets/newapi_admin_token'), 'utf8'), 'fixture-deploy-token');
+  } finally { f.clean(); }
 });
-test('first installation may create a new ledger volume without migration data',{skip:!available},()=>{
-  const dir=setup();
-  try{
-    const result=run(dir,{MOCK_VOLUME_MISSING:'1'});
-    assert.equal(result.status,0,result.stdout+result.stderr);
-    assert.match(result.stdout,/首次安装：允许创建新的持久账本数据卷/);
-    assert.doesNotMatch(result.stdout+result.stderr,/不会新建空账本/);
-    assert.match(result.stdout,/云响已启动/);
-  }finally{rmSync(dir,{recursive:true,force:true});}
+
+test('a completed deployment with a missing ledger fails before building or creating an empty volume', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    initialized(f); rmSync(f.volume, { recursive: true }); rmSync(join(f.state, 'container'), { force: true }); f.clearCalls();
+    const result = f.run();
+    assert.notEqual(result.status, 0, output(result));
+    assert.doesNotMatch(output(result), /云响已启动/);
+    assert.equal(existsSync(f.volume), false);
+    assert.equal(callsWith(f, 'build').length, 0);
+    assert.equal(callsWith(f, 'up').length, 0);
+  } finally { f.clean(); }
 });
-test('one-click installer prompts before downloading an existing deployment',{skip:!available},()=>{
-  const dir=setup();
-  try{
-    assert.equal(run(dir).status,0);
-    const {archive,answer,installer}=remotePackage(dir);
-    const remote=spawnSync(bash,[harness],{
-      cwd:dir,
-      encoding:'utf8',
-      timeout:30000,
-      input:'2\n',
-      env:{...process.env,ARCHIVE:toMsys(archive),YUNXIANG_INSTALLER:toMsys(join(installer,'install.sh')),YUNXIANG_ANSWER:toMsys(answer),NODE_EXE:process.execPath.replaceAll('\\','/'),YUNXIANG_INSTALL_DIR:dir,NEWAPI_URL:'https://newapi.example.com',NEWAPI_ADMIN_USER_ID:'1',NEWAPI_ADMIN_TOKEN:'fixture-deploy-token',PUBLIC_ORIGIN:'https://refund.example.com',COMPENSATION_PORT:'3210'}
-    });
-    assert.equal(remote.status,0,remote.stdout+remote.stderr);
-    assert.match(remote.stdout,/部署模式：migrate/);
-    assert.ok(remote.stdout.indexOf('选择操作 [1-3，默认 1]: 2')<remote.stdout.indexOf('下载云响：'));
-  }finally{rmSync(dir,{recursive:true,force:true});}
+
+test('legacy failed installation requires explicit fresh-install confirmation before creating an empty ledger', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    initialized(f); rmSync(join(f.directory, '.yunxiang-deploy-state')); rmSync(f.volume, { recursive: true }); rmSync(join(f.state, 'container'), { force: true });
+    const blocked = f.run(); assert.notEqual(blocked.status, 0, output(blocked));
+    assert.equal(existsSync(f.volume), false);
+    ok(f.run('install.sh', ['--install', '--non-interactive']));
+    assert.equal(existsSync(ledger(f)), true);
+  } finally { f.clean(); }
 });
-test('one-click uninstall menu runs without downloading and removes only yunxiang objects',{skip:!available},()=>{
-  const dir=setup();
-  try{
-    assert.equal(run(dir).status,0);
-    const {archive,answer,installer}=remotePackage(dir);
-    writeFileSync(answer,'4\n彻底卸载\n');
-    const dockerLog=join(dir,'docker-before-uninstall.log');
-    const remote=spawnSync(bash,[harness],{
-      cwd:dir,
-      encoding:'utf8',
-      timeout:30000,
-      env:{...process.env,ARCHIVE:toMsys(archive),YUNXIANG_INSTALLER:toMsys(join(installer,'install.sh')),YUNXIANG_ANSWER:toMsys(answer),NODE_EXE:process.execPath.replaceAll('\\','/'),YUNXIANG_INSTALL_DIR:dir,MOCK_DOCKER_LOG:toMsys(dockerLog),MOCK_UNINSTALL_CONTAINERS:'1',NEWAPI_URL:'https://newapi.example.com',NEWAPI_ADMIN_USER_ID:'1',NEWAPI_ADMIN_TOKEN:'fixture-deploy-token',PUBLIC_ORIGIN:'https://refund.example.com',COMPENSATION_PORT:'3210'}
-    });
-    assert.equal(remote.status,0,remote.stdout+remote.stderr);
-    assert.match(remote.stdout,/选择操作 \[1-4，默认 1\]:/);
-    assert.match(remote.stdout,/云响已彻底卸载/);
-    assert.ok(remote.stdout.indexOf('选择操作 [1-4，默认 1]:')<remote.stdout.indexOf('输入“彻底卸载”确认删除：'));
-    assert.ok(!remote.stdout.includes('下载云响：'));
-    assert.ok(!existsSync(join(dir,'src/server.mjs')));
-    assert.ok(!existsSync(join(dir,'secrets/newapi_database.json')));
-    const calls=readFileSync(dockerLog,'utf8');
-    assert.ok(!calls.includes('compose -p newapi-compensation'));
-    assert.ok(!calls.includes('rm -f'));
-    assert.ok(!calls.includes('volume rm '));
-    assert.ok(!calls.includes('rmi '));
-    assert.doesNotMatch(calls,/云中猫|newapi([^-]|$)|docker-newapi/i);
-  }finally{rmSync(dir,{recursive:true,force:true});}
+
+test('bare domain input is normalized and invalid interactive input can be corrected', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    const result = f.run('auto-deploy.sh', ['--install'], { PUBLIC_ORIGIN: '' }, { interactive: true, input: 'bad\n3210\nbad/path\nyx.yzmao.cn\n' });
+    ok(result);
+    assert.match(readFileSync(join(f.directory, '.env.auto'), 'utf8'), /^PUBLIC_ORIGIN=https:\/\/yx\.yzmao\.cn$/m);
+  } finally { f.clean(); }
 });
-test('uninstall removes exact yunxiang resources and requires explicit confirmation',{skip:!available},()=>{
-  const dir=setup();
-  try{
-    assert.equal(run(dir).status,0);
-    const confirm=runUninstall(dir,'uninstall.sh');
-    assert.equal(confirm.status,1,confirm.stdout+confirm.stderr);
-    assert.match(confirm.stdout,/输入“彻底卸载”确认删除/);
-    assert.match(confirm.stdout,/未确认，已取消卸载/);
-    assert.ok(existsSync(join(dir,'.env.auto')));
-    const unattended=runUninstall(dir,'uninstall.sh',{MOCK_UNATTEND:'1'});
-    assert.equal(unattended.status,0,unattended.stdout+unattended.stderr);
-    assert.match(unattended.stdout,/云响已彻底卸载/);
-    assert.ok(!existsSync(join(dir,'.env.auto')));
-    const calls=readFileSync(join(dir,'docker.log'),'utf8');
-    assert.match(calls,/rm -f -- mock-yunxiang-container/);
-    assert.match(calls,/volume rm newapi-compensation_compensation_data/);
-    assert.match(calls,/rmi yunxiang-newapi-compensation:local/);
-    assert.doesNotMatch(calls,/docker-newapi|newapi-network|云中猫/);
-  }finally{rmSync(dir,{recursive:true,force:true});}
+
+test('Docker Compose discovery connects to the existing upstream bridge without modifying it', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    const result = f.run('auto-deploy.sh', ['--non-interactive'], { NEWAPI_URL: '', MOCK_DISCOVER_NEWAPI: '1' }); ok(result);
+    const env = readFileSync(join(f.directory, '.env.auto'), 'utf8');
+    assert.match(env, /NEWAPI_URL=http:\/\/newapi-main:3000/);
+    const compose = JSON.parse(readFileSync(join(f.directory, 'docker-compose.yml'), 'utf8'));
+    assert.equal(compose.services.compensation.network_mode, 'baota_net');
+    assert.equal(f.calls().some(call => call[0] === 'network' && call[1] !== 'inspect'), false);
+  } finally { f.clean(); }
 });
-test('uninstall refuses unsafe install directories',{skip:!available},()=>{
-  const dir=setup();
-  try{
-    const result=runUninstall(dir,'uninstall.sh',{MOCK_UNATTEND:'1',YUNXIANG_INSTALL_DIR:'/opt'});
-    assert.equal(result.status,1,result.stdout+result.stderr);
-    assert.match(result.stdout,/拒绝删除高危路径：\/opt/);
-  }finally{rmSync(dir,{recursive:true,force:true});}
+
+for (const args of [['--uninstall', '--yes'], ['--mode', 'uninstall', '--yes']]) {
+  test(`install entry dispatches ${args.join(' ')} to uninstall`, { skip: !bashAvailable }, () => {
+    const f = deployFixture();
+    try {
+      initialized(f); f.clearCalls();
+      const result = f.run('install.sh', args); ok(result);
+      assert.match(output(result), /云响已彻底卸载/);
+      assert.equal(existsSync(f.directory), false);
+      assert.equal(existsSync(f.volume), false);
+      assert.equal(existsSync(join(f.state, 'container')), false);
+      assert.equal(existsSync(join(f.state, 'image')), false);
+      assert.equal(callsWith(f, 'up').length, 0);
+    } finally { f.clean(); }
+  });
+}
+
+test('command-line mode overrides the environment and selects migration once', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    initialized(f); f.clearCalls();
+    const result = f.run('install.sh', ['--mode', 'migrate', '--non-interactive'], { YUNXIANG_DEPLOY_MODE: 'uninstall' }); ok(result);
+    assert.match(output(result), /migrate|迁移/);
+    assert.equal(existsSync(f.directory), true);
+    assert.equal(callsWith(f, 'up').length, 1);
+    assert.doesNotMatch(output(result), /选择操作|云响已彻底卸载/);
+  } finally { f.clean(); }
 });
-test('one-click build failure does not report success or remove saved configuration',{skip:!available},()=>{
-  const dir=setup();
-  try{
-    const result=run(dir,{MOCK_BUILD_FAIL:'1'});
-    assert.equal(result.status,42,result.stdout+result.stderr);
-    assert.doesNotMatch(result.stdout,/云响已启动/);assert.ok(existsSync(join(dir,'.env.auto')));
-    assert.ok(existsSync(join(dir,'secrets/newapi_admin_token')));
-  }finally{rmSync(dir,{recursive:true,force:true});}
+
+test('remote menu appears once before the release archive is downloaded', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    initialized(f);
+    const remote = f.remote();
+    const result = f.run('install.sh', [], remote.env, { script: remote.script, interactive: true, input: '1\n' }); ok(result);
+    const text = output(result);
+    const menu = text.indexOf('选择操作 [');
+    const download = text.indexOf('下载云响');
+    assert.ok(menu >= 0 && download > menu, text);
+    assert.equal((text.match(/^选择操作 \[/gm) || []).length, 1, text);
+  } finally { f.clean(); }
 });
-test('explicit uninstall mode skips the deployment menu',{skip:!available},()=>{
-  const dir=setup();
-  try{
-    assert.equal(run(dir).status,0);
-    const result=runUninstall(dir,'--uninstall',{MOCK_UNATTEND:'1'});
-    assert.equal(result.status,0,result.stdout+result.stderr);
-    assert.doesNotMatch(result.stdout,/选择操作/);
-    assert.match(result.stdout,/云响已彻底卸载/);
-    assert.ok(!existsSync(join(dir,'install.sh')));
-  }finally{rmSync(dir,{recursive:true,force:true});}
+test('a fresh remote bootstrap completes the menu and configuration without a pre-existing ledger', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    const remote = f.remote();
+    const result = f.run('install.sh', [], { ...remote.env, PUBLIC_ORIGIN: '' }, { script: remote.script, interactive: true, input: '1\n3210\nyx.yzmao.cn\n' }); ok(result);
+    assert.equal(existsSync(ledger(f)), true);
+    assert.match(readFileSync(join(f.directory, '.env.auto'), 'utf8'), /PUBLIC_ORIGIN=https:\/\/yx\.yzmao\.cn/);
+    assert.equal((output(result).match(/^选择操作 \[/gm) || []).length, 1);
+  } finally { f.clean(); }
+});
+
+test('piped bootstrap uses a separate input descriptor for the menu and confirmation', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    initialized(f);
+    const remote = f.remote();
+    const result = f.run('install.sh', [], remote.env, { script: remote.script, interactive: true, input: '4\n彻底卸载\n', pipeScript: true }); ok(result);
+    assert.match(output(result), /云响已彻底卸载/);
+    assert.equal(existsSync(f.directory), false);
+    const downloads = readFileSync(join(f.state, 'downloads.log'), 'utf8');
+    assert.doesNotMatch(downloads, /api\.github\.com/);
+  } finally { f.clean(); }
+});
+
+test('non-interactive uninstall still requires explicit destructive confirmation', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    initialized(f); f.clearCalls();
+    const result = f.run('install.sh', ['--uninstall', '--non-interactive']);
+    assert.notEqual(result.status, 0, output(result));
+    assert.equal(existsSync(ledger(f)), true);
+    assert.equal(f.calls().some(call => ['rm', 'rmi'].includes(call[0]) || call[0] === 'volume' && call[1] === 'rm'), false);
+  } finally { f.clean(); }
+});
+
+test('reinstall builds successfully before removing the previous service and preserves the ledger', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    initialized(f); const before = readFileSync(ledger(f)); f.clearCalls();
+    const failed = f.run('install.sh', ['--reinstall', '--non-interactive'], { MOCK_BUILD_FAIL: '1' });
+    assert.equal(failed.status, 42, output(failed));
+    assert.equal(existsSync(join(f.state, 'container')), true);
+    assert.deepEqual(readFileSync(ledger(f)), before);
+    ok(f.run('install.sh', ['--reinstall', '--non-interactive']));
+    assert.deepEqual(readFileSync(ledger(f)), before);
+    assert.equal(f.calls().some(call => call.includes('--volumes')), false);
+  } finally { f.clean(); }
+});
+
+test('preflight failure leaves a started deployment and never reports successful completion', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    const failed = f.run('auto-deploy.sh', ['--non-interactive'], { MOCK_PREFLIGHT_FAIL: '1' });
+    assert.notEqual(failed.status, 0, output(failed));
+    assert.doesNotMatch(output(failed), /云响已启动/);
+    assert.equal(existsSync(ledger(f)), true);
+    assert.match(readFileSync(join(f.directory, '.yunxiang-deploy-state'), 'utf8'), /started/);
+    ok(f.run());
+    assert.match(readFileSync(join(f.directory, '.yunxiang-deploy-state'), 'utf8'), /ready/);
+  } finally { f.clean(); }
+});
+
+test('a startup failure before SQLite creation remains retryable and keeps an empty volume separate from a lost ledger', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    const failed = f.run('auto-deploy.sh', ['--non-interactive'], { MOCK_UP_FAIL: '1' });
+    assert.notEqual(failed.status, 0, output(failed));
+    assert.equal(existsSync(f.volume), true, 'permission helper prepared an empty volume');
+    assert.equal(existsSync(ledger(f)), false);
+    assert.match(readFileSync(join(f.directory, '.yunxiang-deploy-state'), 'utf8'), /pending/);
+    const retry = f.run(); ok(retry);
+    assert.equal(existsSync(ledger(f)), true);
+    assert.match(readFileSync(join(f.directory, '.yunxiang-deploy-state'), 'utf8'), /ready/);
+  } finally { f.clean(); }
+});
+
+test('invalid modes and unavailable Docker fail without downloads or generated deployment files', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    assert.notEqual(f.run('install.sh', ['--mode', 'wrong']).status, 0);
+    assert.equal(existsSync(join(f.directory, '.env.auto')), false);
+    assert.equal(existsSync(join(f.state, 'downloads.log')), false);
+    const failed = f.run('auto-deploy.sh', ['--non-interactive'], { MOCK_DOCKER_UNAVAILABLE: '1' });
+    assert.notEqual(failed.status, 0);
+    assert.equal(existsSync(join(f.directory, '.env.auto')), false);
+  } finally { f.clean(); }
+});
+test('explicit fresh installation never replaces a lost ledger from a completed deployment', { skip: !bashAvailable }, () => {
+  const f = deployFixture();
+  try {
+    initialized(f); rmSync(f.volume, { recursive: true }); rmSync(join(f.state, 'container'), { force: true }); f.clearCalls();
+    const result = f.run('install.sh', ['--install', '--non-interactive']);
+    assert.notEqual(result.status, 0, output(result));
+    assert.equal(existsSync(f.volume), false);
+    assert.equal(callsWith(f, 'build').length, 0);
+    assert.equal(callsWith(f, 'up').length, 0);
+  } finally { f.clean(); }
+});
 });

@@ -12,7 +12,27 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-comp
 
 首次运行会依次检测 Docker、Compose 与 云中猫API小站 容器，询问本机端口、访问域名、站长 ID 和管理令牌，再构建镜像、启动持久化服务并执行只读接入检查。成功后终端输出访问地址。管理令牌隐藏输入，不保存原站密码，不创建默认生产账号。Linux 需安装 `curl`、`tar`、`util-linux`（提供 `flock`）。
 
-查看参数：`bash install.sh --help`。固定版本时将命令 URL 中的 `main` 与 `YUNXIANG_REF` 同时改成同一标签或提交号；不要只修改其中一个。检测到已有部署时，交互入口会提供四个操作：更新、迁移修复、重新安装和彻底卸载。更新保留数据卷、secrets 和接入配置并重建启动；迁移修复用于新服务器路径、网络或账本卷异常；重新安装会清理旧容器后重建，仍保留数据卷、secrets 和接入配置；彻底卸载会删除云响专属数据。无人值守入口可用 `--update`、`--migrate`、`--reinstall`、`--uninstall` 或 `YUNXIANG_DEPLOY_MODE` 指定。
+查看参数：`bash install.sh --help`。固定版本时将命令 URL 中的 `main` 与 `YUNXIANG_REF` 同时改成同一标签或提交号。下载式入口先加载同版本的小型交互脚本，再显示操作菜单，选择后才下载完整源码：
+
+1. 安装 / 更新：首次创建账本、继续未完成的首次安装，或保留账本更新。
+2. 迁移修复：核对导入数据、安装路径、数据权限和原站网络。
+3. 重新安装：先构建，再重建云响容器；保留账本、secrets 和接入配置。
+4. 彻底卸载：输入确认文字后删除云响专属资源。
+0. 退出：不执行部署或卸载。
+
+端口和域名输入无效时，只重新询问当前字段。输入 `yx.yzmao.cn` 会保存为 `https://yx.yzmao.cn`；公网 HTTP、带路径或带凭据的地址会被拒绝。`--non-interactive` 关闭所有终端询问，必填配置缺失时明确报错；不会把管道中的脚本内容当作回答。命令行模式优先于 `YUNXIANG_DEPLOY_MODE`，冲突的命令行模式会报错。
+
+## 首次安装失败后继续
+
+`.yunxiang-deploy-state` 记录 `pending`（首次安装尚未创建账本）、`started`（账本已恢复、已写入或容器已启动）和 `ready`（健康及接入检查通过）。首次配置通过后即使构建失败，也保留配置和隐藏令牌；尚未写出数据库的启动失败也能重试。更新、迁移、重装不会删除旧账本来换成空账本。
+
+旧版脚本可能只留下接入配置，没有安装状态、容器、数据卷和备份。交互入口会要求输入 `全新安装` 才允许继续初始化。确认为从未成功启动的安装时，也能明确指定：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-compensation/main/install.sh) --install
+```
+
+此选项保留已有配置和令牌，不删除任何数据；已经标记为 `started` 或 `ready` 的部署缺少账本时仍停止。迁移已有数据使用 `--migrate`，不要把已有账本遗失当成新安装。
 
 ## 无人值守部署
 
@@ -37,7 +57,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-comp
 
 交互模式需要输入 `彻底卸载` 确认。确认后删除云响专属容器 `yunxiang-compensation`、Compose 项目 `newapi-compensation`、本地镜像 `yunxiang-newapi-compensation:local`、账本数据卷 `newapi-compensation_compensation_data`、宿主机 secrets 和安装目录（默认 `/opt/yunxiang`）。命令不修改 云中猫API小站 容器、网络、数据库、反向代理或 TLS 证书。
 
-已进入下载式安装菜单时也可选择 `4. 彻底卸载`。远程脚本会在确认后执行本地 `uninstall.sh`，不先下载源码。无人值守卸载使用：
+已进入安装菜单时也可选择 `4. 彻底卸载`。下载式入口只取同版本卸载脚本，不下载和覆盖整套源码。`--non-interactive` 本身不会确认删除，无人值守卸载必须显式加 `--yes`：
 
 ```bash
 YUNXIANG_INSTALL_DIR=/opt/yunxiang bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-compensation/main/uninstall.sh) --yes
@@ -45,9 +65,11 @@ YUNXIANG_INSTALL_DIR=/opt/yunxiang bash <(curl -fsSL https://raw.githubuserconte
 
 自定义安装目录必须设置 `YUNXIANG_INSTALL_DIR`。卸载脚本拒绝 `/`、`/opt`、`/home` 等高危路径；目录存在但缺少云响标识文件时同样拒绝删除。
 
-同机 Docker 自动适配使用 `NEWAPI_CONTAINER` 指定容器，不设置 `NEWAPI_URL`。多个网络使用 `NEWAPI_NETWORK`，非默认内部端口使用 `NEWAPI_PORT`。管理 ID、令牌缺失时安装报错退出，不生成猜测的凭据。更新使用已有配置，当前 shell 的原站地址、管理 ID 和域名不会覆盖已有账本的接入设置。
+卸载先确认 Docker 引擎可用，精确检查云响容器归属，再删除云响资源；容器、卷或镜像删除失败时保留安装目录并报错，不会显示卸载成功。安装、迁移和卸载共用同一目标目录锁，避免并发操作。
 
 ## 自动适配
+
+同机 Docker 自动适配使用 `NEWAPI_CONTAINER` 指定容器，不设置 `NEWAPI_URL`。多个网络使用 `NEWAPI_NETWORK`，非默认内部端口使用 `NEWAPI_PORT`。管理 ID、令牌缺失时安装报错退出，不生成猜测的凭据。更新读取已有配置，当前 shell 的原站地址、管理 ID 和域名不会覆盖接入设置。
 
 - 从运行中容器名称、镜像、启动命令识别 云中猫API小站；多个候选必须选择，不盲选。
 - Docker/Compose 自定义 bridge 网络：复用容器现有网络及内部 PORT，不挂载原站数据库。
@@ -90,11 +112,15 @@ docker compose --env-file .env.auto -f compose.generated.json logs --tail 100 co
 
 再次运行下载式入口下载源码并重建镜像，不删除数据卷，不覆盖 secrets 和既有部署配置。镜像构建会运行后端测试，上线后只读预检验证身份及日志读取，不发放额度。健康检查不代表真实补款与通知均已验证。
 
-仅使用本地已下载的源码时，`bash install.sh` 会重新构建当前源码；需要获取仓库新版本时重新运行上方下载式命令。部署通过文件锁禁止并发操作。构建或接入检查失败会保留持久数据，终端不会输出部署成功。
+仅使用本地已下载的源码时，`bash install.sh` 会重新构建当前源码；需要获取仓库新版本时重新运行上方下载式命令。构建在暂停旧服务之前完成，构建失败时旧服务继续运行；文件校验或权限修复失败会保留旧账本并尝试恢复原容器，恢复失败会明确报出。重新安装使用无缓存构建并强制重建云响容器。修复数据权限后以应用 UID 1000 实际验证可写，再启动服务，避免迁移后的只读 SQLite 重启循环。接入检查失败不会输出部署成功。
 
 ## 跨服务器迁移
 
 云响账本在 Docker named volume `newapi-compensation_compensation_data`，只复制源码目录不会迁移数据。旧服务器执行 `bash migrate.sh export yunxiang-migration.tar.gz`，把迁移包传到新服务器的云响源码目录后执行 `bash migrate.sh import yunxiang-migration.tar.gz`，最后运行 `bash install.sh`。
+
+导出会暂时停止云响写入容器，复制完整账本、WAL 和加密密钥，完成或失败后恢复原来运行的容器。导入先验证压缩包路径、链接、配置、SQLite 完整性和通知密钥，随后创建卷；目标已有部署或数据卷时拒绝覆盖。只读备份缺少 SHM 时在临时副本中验证 SQLite，不向备份源写入。
+
+从旧容器恢复到新卷时，复制和目标校验通过后，新卷成为唯一写入账本；后续启动失败不会再恢复旧容器向旧账本写入，重新运行会继续使用恢复卷。复制失败时只撤回本次新建、且没有容器引用的未完成卷；无法撤回时保留所有数据并报错。
 
 导入会恢复数据卷、`.env.auto`、`compose.generated.json` 和宿主机 secrets；不会恢复镜像，也不会覆盖已有数据卷。手动把账本放到当前目录 `data/`（包含 SQLite 及同目录 WAL/SHM 文件）或现存 `yunxiang-compensation` 容器的 `/app/data` 时，安装器会自动恢复到持久卷，不需要再执行导入。新服务器缺少原外部网络时，安装器会按当前 云中猫API小站 容器重新识别网络，无法唯一识别时用 `NEWAPI_NETWORK` 指定。迁移自检发现旧绝对路径会自动改写为当前安装目录。数据卷缺失且没有任何可恢复账本时安装会停止，不会新建空账本冒充迁移成功。
 

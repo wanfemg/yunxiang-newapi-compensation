@@ -2,7 +2,20 @@
 set -uo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 command -v docker >/dev/null || { echo '未安装 Docker。'; exit 1; }
+docker info >/dev/null 2>&1 || { echo 'Docker 引擎不可用，无法判断部署状态；未改动配置和数据。'; exit 1; }
 failed=0
+echo '=== 云响安装状态 ==='
+if [[ -s .yunxiang-deploy-state ]]; then
+  phase=$(< .yunxiang-deploy-state)
+  case $phase in
+    pending) echo '首次配置或构建未完成：重新运行一键入口继续安装。' ;;
+    started) echo '容器曾启动：账本必须保留；正在等待健康检查或原站接入检查通过。' ;;
+    ready) echo '上一次部署已通过健康检查和原站接入检查。' ;;
+    *) echo '安装状态文件无效。'; failed=1 ;;
+  esac
+else
+  echo '旧版部署或尚未首次安装；安装器会核对持久账本后再执行操作。'
+fi
 echo '=== Docker 引擎 ==='
 docker context show || failed=1
 docker info --format '名称：{{.Name}}；版本：{{.ServerVersion}}' || failed=1
@@ -15,12 +28,12 @@ docker volume inspect newapi-compensation_compensation_data --format '名称：{
 if docker volume inspect newapi-compensation_compensation_data >/dev/null 2>&1; then
   echo '数据卷存在；缺失时不要重装成空账本，使用 migrate.sh 导入旧服务器备份。'
 else
-  echo '数据卷缺失：部署会自动尝试 data/compensation.sqlite 或现存容器内账本；都没有才会停止。'
+  echo '数据卷缺失：未完成的首次安装会继续；已有部署须恢复 data/compensation.sqlite、现存容器账本或迁移包。'
 fi
 if [[ -s docker-compose.yml ]]; then
   args=(-p newapi-compensation -f docker-compose.yml)
 elif [[ -s .env.auto && -s compose.generated.json ]]; then
-  args=(--env-file .env.auto -f compose.generated.json)
+  args=(-p newapi-compensation --env-file .env.auto -f compose.generated.json)
 else
   echo '部署配置缺失：安装可能只下载了源码，尚未构建启动。重新运行一键部署并保留错误输出。'
   exit 1
