@@ -24,8 +24,8 @@ if [[ ! -s secrets/newapi_database.json || "${REFRESH_NEWAPI_DB:-0}" == 1 ]]; th
   # Full inspect JSON exists only in the pipe; never print credentials or save it.
   if ! docker inspect --type container --format '{{json .}}' "$db_container" |
     docker run --rm -i --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
-      --mount "type=bind,src=$(pwd)/src/db-discovery.mjs,dst=/discovery.mjs,readonly" \
-      node:24-bookworm-slim node /discovery.mjs > "$db_temp"; then
+      --mount "type=bind,src=$PWD/src,dst=/app/src,readonly" -w /app \
+      node:24-bookworm-slim node src/db-discovery.mjs > "$db_temp"; then
     echo '数据库配置识别失败，未替换原配置。'; exit 1
   fi
   chmod 444 "$db_temp"

@@ -5,10 +5,11 @@ yx_die(){ printf '%s\n' "$*" >&2; exit 1; }
 
 yx_help(){
   printf '%s\n' \
-    '云响一键部署：bash install.sh [--install|--update|--migrate|--reinstall|--uninstall]' \
-    '默认交互选择：安装/更新、迁移修复、重新安装（保留账本）、彻底卸载。' \
+    '云响一键部署：bash install.sh [--install|--update|--migrate|--reinstall|--uninstall|--refresh-newapi]' \
+    '默认交互选择：安装/更新、迁移修复、重新安装（保留账本）、彻底卸载、重新获取 NewAPI。' \
     '--install / --fresh：明确继续首次安装，不删除任何已有数据。' \
-    '--mode install|update|migrate|reinstall|uninstall：与对应选项等效。' \
+    '--refresh-newapi / --rediscover / --reconnect：重新获取 NewAPI 项目、主库、日志库与网络并验证关联。' \
+    '--mode install|update|migrate|reinstall|uninstall|refresh：与对应选项等效。' \
     '--non-interactive：不读取终端；卸载另须 --yes 才会删除数据。' \
     '--yes：确认卸载。--help：显示帮助。' \
     'YUNXIANG_INSTALL_DIR：安装目录（下载式默认 /opt/yunxiang，本地入口默认当前源码目录）。' \
@@ -29,6 +30,7 @@ yx_parse_args(){
       --migrate) candidate=migrate ;;
       --reinstall) candidate=reinstall ;;
       --uninstall) candidate=uninstall ;;
+      --refresh-newapi|--rediscover|--reconnect) candidate=refresh ;;
       --mode)
         (($# > 1)) || yx_die '--mode 缺少操作名称。'
         candidate=$2
@@ -39,13 +41,13 @@ yx_parse_args(){
       --help|-h) yx_help; exit 0 ;;
       *) yx_die "未知参数：$1" ;;
     esac
-    case $candidate in install|update|migrate|reinstall|uninstall) ;; *) yx_die "未知部署模式：$candidate" ;; esac
+    case $candidate in install|update|migrate|reinstall|uninstall|refresh) ;; *) yx_die "未知部署模式：$candidate" ;; esac
     [[ -z $cli_mode || $cli_mode == "$candidate" ]] || yx_die '一次只能指定一种部署操作。'
     cli_mode=$candidate
     shift
   done
   [[ -z $cli_mode ]] || yx_mode=$cli_mode
-  case $yx_mode in ''|install|update|migrate|reinstall|uninstall) ;; *) yx_die "未知部署模式：$yx_mode" ;; esac
+  case $yx_mode in ''|install|update|migrate|reinstall|uninstall|refresh) ;; *) yx_die "未知部署模式：$yx_mode" ;; esac
 }
 
 yx_read(){
@@ -81,14 +83,16 @@ yx_select_mode(){
 2. 迁移修复：恢复导入账本，修复安装路径、数据权限和原站网络
 3. 重新安装：重建云响容器与镜像，保留账本、secrets 和接入配置
 4. 彻底卸载：删除云响容器、镜像、账本、secrets 和安装目录
+5. 重新获取 NewAPI 项目与数据库：重新识别主体、配置文件、网络和主库/日志库，检查关联
 0. 退出
 EOF
-  yx_read '选择操作 [0-4，默认 1]: ' 1
+  yx_read '选择操作 [0-5，默认 1]: ' 1
   case $REPLY in
     1) yx_mode=update ;;
     2) yx_mode=migrate ;;
     3) yx_mode=reinstall ;;
     4) yx_mode=uninstall ;;
+    5) yx_mode=refresh ;;
     0) printf '%s\n' '已退出。'; exit 0 ;;
     *) yx_die '选项无效，未执行操作。' ;;
   esac

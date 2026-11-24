@@ -4,7 +4,7 @@ set -euo pipefail
 uname(){ printf 'Linux\n'; }
 flock(){ [[ ${MOCK_LOCK_FAIL:-0} != 1 ]]; }
 ss(){ [[ ${MOCK_PORT_BUSY:-0} != 1 ]] || printf 'LISTEN 0 128 127.0.0.1:3210\n'; }
-docker(){ "$NODE_EXE" "$YUNXIANG_DOCKER_CLI" "$@"; }
+docker(){ "$NODE_EXE" -- "$YUNXIANG_DOCKER_CLI" "$@"; }
 curl(){
   local output='' url='' previous=''
   for argument in "$@"; do

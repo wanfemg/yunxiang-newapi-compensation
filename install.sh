@@ -75,19 +75,19 @@ if [[ -z $source_dir ]]; then
   while IFS= read -r -d '' script; do sed -i 's/\r$//' "$script"; done < <(find "$source_dir" -type f -name '*.sh' -print0)
   sed -i 's/\r$//' "$source_dir/Dockerfile"
 fi
-for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh deploy-runtime.sh install.sh status.sh migrate.sh uninstall.sh README.md; do
+for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh deploy-runtime.sh newapi-link.sh install.sh status.sh migrate.sh uninstall.sh README.md; do
   [[ -e $source_dir/$item ]] || yx_die "发布包缺少 $item，未修改现有安装。"
 done
 yx_acquire_lock "$target"
 mkdir -p -- "$target"
-for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh deploy-runtime.sh install.sh status.sh migrate.sh uninstall.sh README.md; do
+for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh deploy-runtime.sh newapi-link.sh install.sh status.sh migrate.sh uninstall.sh README.md; do
   [[ ! -L $target/$item ]] || yx_die "安装路径是符号链接：$item"
   if [[ -d $target/$item && -n $(find "$target/$item" -type l -print -quit) ]]; then
     yx_die "安装目录含符号链接：$item"
   fi
 done
 if [[ $source_dir != "$target" ]]; then
-  for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh deploy-runtime.sh install.sh status.sh migrate.sh uninstall.sh README.md; do cp -R -- "$source_dir/$item" "$target/"; done
+  for item in src public test Dockerfile .dockerignore .gitattributes package.json package-lock.json auto-deploy.sh deploy-runtime.sh newapi-link.sh install.sh status.sh migrate.sh uninstall.sh README.md; do cp -R -- "$source_dir/$item" "$target/"; done
   [[ ! -L $target/docs ]] || yx_die '文档目录是符号链接。'
   mkdir -p -- "$target/docs"
   [[ ! -L $target/docs/one-click.md ]] || yx_die '部署说明是符号链接。'

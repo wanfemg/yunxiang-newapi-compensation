@@ -23,6 +23,11 @@ restore_created=0
 restore_committed=0
 cleanup(){
   local code=$?
+  if ((code != 0)) && declare -F yx_rollback_newapi >/dev/null && [[ -d ${link_backup:-.yunxiang-link.rollback} ]]; then
+    if ! yx_rollback_newapi; then echo 'NewAPI 关联回滚未完成；回滚配置已保留在 .yunxiang-link.rollback，修复后重运行部署入口。' >&2; fi
+  fi
+  [[ -z ${link_temp:-} ]] || rm -rf -- "$link_temp"
+  [[ -z ${link_prepared:-} ]] || rm -rf -- "$link_prepared"
   if ((code != 0 && restore_created && restore_committed == 0)); then
     local references
     if references=$(docker ps -aq --filter "volume=$volume") && [[ -z $references ]] &&
@@ -47,7 +52,7 @@ trap cleanup EXIT
 volume=newapi-compensation_compensation_data
 state_file=.yunxiang-deploy-state
 pending_dir=.yunxiang-config.pending
-for path in secrets "$state_file" "$state_file.pending" "$pending_dir" .env.auto .env.auto.pending compose.generated.json compose.generated.json.pending docker-compose.yml docker-compose.yml.pending; do
+for path in secrets "$state_file" "$state_file.pending" "$pending_dir" .yunxiang-link.rollback .env.auto .env.auto.pending compose.generated.json compose.generated.json.pending docker-compose.yml docker-compose.yml.pending; do
   [[ ! -L $path ]] || yx_die "部署路径不能是符号链接：$path"
 done
 mkdir -p secrets
@@ -84,6 +89,12 @@ prompt(){
   if ((yx_non_interactive)); then REPLY=$2; else yx_read "$1" "$2" "${3:-0}"; fi
 }
 valid_port(){ [[ $1 =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
+source ./newapi-link.sh
+if [[ -d $link_backup ]]; then
+  echo '检测到未完成的 NewAPI 重新关联，先恢复上次稳定配置。'
+  yx_rollback_newapi || yx_die '未能恢复上次关联，已保留回滚文件。'
+  [[ ! -s $state_file ]] || phase=$(< "$state_file")
+fi
 commit_config(){
   local item
   for item in .env.auto compose.generated.json secrets/newapi_database.json secrets/newapi_admin_token; do
@@ -103,53 +114,12 @@ if [[ $phase == pending && -d $pending_dir ]]; then
 fi
 saved_config=0
 if [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.json ]]; then saved_config=1; fi
+[[ $yx_mode != refresh || $saved_config == 1 ]] || yx_die '重新获取需要已有完整云响接入配置；首次部署选择安装/更新。'
 if ((saved_config == 0)); then
   [[ $yx_mode != migrate && $yx_mode != reinstall ]] || yx_die '未发现完整接入配置；首次安装选择安装/更新，已有部署先导入迁移包。'
   [[ ! -e .env.auto && ! -e compose.generated.json ]] || yx_die '接入配置不完整，已保留现有文件；未创建空账本。'
   set_phase pending
-  container=${NEWAPI_CONTAINER:-}
-  url=${NEWAPI_URL:-}
-  if [[ -z $container && -z $url ]]; then
-    ids=$(docker ps -q)
-    choices='[]'
-    if [[ -n $ids ]]; then choices=$(docker inspect $ids | node_tool src/deployment.mjs candidates); fi
-    count=$(printf '%s' "$choices" | json_get length)
-    if [[ $count == 1 ]]; then
-      container=$(printf '%s' "$choices" | json_get 0.name)
-    elif [[ $count != 0 ]]; then
-      printf '检测到多个原站容器：\n%s\n' "$choices"
-      prompt '选择 云中猫API小站 容器名称: ' ''
-      container=$REPLY
-      [[ -n $container ]] || yx_die '未选择原站容器；设置 NEWAPI_CONTAINER。'
-    else
-      prompt '云中猫API小站 地址 [http://127.0.0.1:3000]: ' 'http://127.0.0.1:3000'
-      url=$REPLY
-    fi
-  fi
-  if [[ -n $container ]]; then
-    [[ $container =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || yx_die '容器名无效。'
-    inspected=$(docker inspect --type container --format '{{json .}}' "$container")
-    selected_network=${NEWAPI_NETWORK:-}
-    available_networks=$(printf '%s' "$inspected" | node_tool --input-type=module -e \
-      'import fs from "node:fs";const c=JSON.parse(fs.readFileSync(0,"utf8"));console.log(JSON.stringify(c.HostConfig?.NetworkMode==="host"?[]:Object.keys(c.NetworkSettings?.Networks||{}).filter(n=>!["bridge","host","none"].includes(n))))')
-    if [[ -z $selected_network && $(printf '%s' "$available_networks" | json_get length) -gt 1 ]]; then
-      echo "原站已连接网络：$available_networks"
-      prompt '选择供云响连接的原站网络名称: ' ''
-      selected_network=$REPLY
-      [[ -n $selected_network ]] || yx_die '原站有多个网络；设置 NEWAPI_NETWORK 后重试。'
-    fi
-    plan=$(printf '%s' "$inspected" | node_tool src/deployment.mjs container "$selected_network" "${NEWAPI_PORT:-}")
-  else
-    plan=$(node_tool --input-type=module -e 'import {deploymentPlan} from "./src/deployment.mjs";console.log(JSON.stringify(deploymentPlan(null,{url:process.argv[1]})))' "$url")
-  fi
-  url=$(printf '%s' "$plan" | json_get url)
-  network=$(printf '%s' "$plan" | json_get network)
-  if [[ $network != host ]]; then
-    [[ $(docker network inspect --format '{{.Driver}}' "$network") == bridge ]] || yx_die '原站网络必须是 bridge 或 host。'
-  fi
-  node_tool --input-type=module -e 'const u=new URL(process.argv[1]);if(u.username||u.password||u.search||u.hash||u.pathname!=="/"||!["https:","http:"].includes(u.protocol))throw Error("原站地址必须是不带凭据的根地址");' "$url"
-  mode=$(printf '%s' "$plan" | json_get mode)
-  echo "检测部署模式：$mode；接入：$url；云响网络：$network"
+  yx_discover_newapi
   app_port=${COMPENSATION_PORT:-3210}
   while :; do
     prompt "云响本地端口 [$app_port]: " "$app_port"
@@ -195,6 +165,7 @@ if ((saved_config == 0)); then
   printf '%s' "$token" > "$pending_dir/secrets/newapi_admin_token"
   unset token NEWAPI_ADMIN_TOKEN
   node_tool src/deployment-config.mjs check < "$pending_dir/.env.auto" >/dev/null
+  yx_verify_newapi "$pending_dir"
   commit_config
 else
   echo "部署模式：$yx_mode；复用已有接入配置与持久账本。"
@@ -217,6 +188,11 @@ if [[ ! -s secrets/newapi_admin_token ]]; then
   unset token
 fi
 unset NEWAPI_ADMIN_TOKEN
+
+if [[ $yx_mode == refresh ]]; then
+  yx_refresh_newapi
+  exit 0
+fi
 echo '检查部署状态：安装路径、原站网络和持久账本。'
 fresh_volume=0
 restore_volume=0

@@ -8,7 +8,7 @@ COPY test ./test
 COPY *.sh ./
 COPY Dockerfile .dockerignore .gitattributes README.md ./
 COPY docs/one-click.md ./docs/one-click.md
-RUN node --test test/*.test.mjs
+RUN node --test --test-concurrency=1 test/*.test.mjs
 
 FROM node:24-bookworm-slim AS runtime
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3210 DATA_DIR=/app/data

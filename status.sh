@@ -41,6 +41,9 @@ fi
 docker compose "${args[@]}" ps -a || failed=1
 echo '=== 本地健康检查（不访问余额接口） ==='
 docker compose "${args[@]}" exec -T compensation node -e 'fetch("http://127.0.0.1:"+process.env.PORT+"/api/health").then(async r=>{if(!r.ok)throw Error("HTTP "+r.status);console.log(await r.text())}).catch(e=>{console.error(e.message);process.exitCode=1})' || failed=1
+echo '=== NewAPI 身份、日志、额度读取和规则关联检查（只读） ==='
+docker compose "${args[@]}" exec -T compensation node src/preflight.mjs || failed=1
+echo '重新识别项目与数据库：bash install.sh --refresh-newapi'
 echo "标准编排文件：$PWD/docker-compose.yml"
 echo '面板无记录但以上容器健康：在宝塔导入现有编排文件。镜像为空或容器缺失：查看一键部署错误；不要删除数据卷后重装。'
 exit "$failed"

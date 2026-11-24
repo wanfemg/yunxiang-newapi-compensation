@@ -16,7 +16,7 @@ function oldBoundLedger(f) {
   writeFileSync(join(source, 'secrets.key'), Buffer.alloc(32, 19));
   mkdirSync(join(f.directory, 'secrets'));
   writeFileSync(join(f.directory, 'secrets/newapi_admin_token'), 'fixture-deploy-token');
-  writeFileSync(join(f.directory, 'secrets/newapi_database.json'), '{"version":1,"connected":false}');
+  writeFileSync(join(f.directory, 'secrets/newapi_database.json'), JSON.stringify({ version: 1, connected: false, mode: 'api', main: { type: 'unknown' }, logs: { type: 'unknown' } }));
   writeFileSync(join(f.directory, '.env.auto'), 'PUBLIC_ORIGIN=https://refund.example.com\nNEWAPI_URL=https://newapi.example.com\nNEWAPI_ADMIN_USER_ID=1\nALLOW_HTTP_UPSTREAM=0\n');
   writeFileSync(join(f.directory, 'compose.generated.json'), JSON.stringify(composePlan({ network: 'host', port: 3210 })));
   writeFileSync(join(f.directory, '.yunxiang-deploy-state'), 'ready\n');
@@ -89,11 +89,14 @@ test('restoring an imported ledger executes the actual copy command and preserve
     writeFileSync(join(imported, 'dingtalk.enc'), 'fixture-encrypted-bot');
     const source = readFileSync(join(imported, 'compensation.sqlite'));
     const result = f.run('auto-deploy.sh', ['--migrate', '--non-interactive']); ok(result);
-    assert.deepEqual(readFileSync(join(f.volume, 'compensation.sqlite')), source);
+    assert.deepEqual(readFileSync(join(imported, 'compensation.sqlite')), source, 'starting the restored copy must leave the imported source unchanged');
     assert.deepEqual(readFileSync(join(f.volume, 'secrets.key')), encryptionKey);
     assert.equal(readFileSync(join(f.volume, 'dingtalk.enc'), 'utf8'), 'fixture-encrypted-bot');
     const restored = new DatabaseSync(join(f.volume, 'compensation.sqlite'));
-    assert.equal(restored.prepare('SELECT value FROM marker').get().value, 'migration sentinel'); restored.close();
+    try {
+      assert.equal(restored.prepare('SELECT value FROM marker').get().value, 'migration sentinel');
+      assert.equal(restored.prepare("SELECT value FROM metadata WHERE key='newapi_origin'").get().value, 'https://newapi.example.com');
+    } finally { restored.close(); }
     const helper = f.calls().filter(call => call[0] === 'run' && call.some(argument => argument.includes('/restore')));
     assert.ok(helper.some(call => call.includes('restore-volume')), 'production helper must execute its real ledger restoration command');
   } finally { f.clean(); }
@@ -141,7 +144,13 @@ test('after ledger handoff a startup failure preserves the new ledger and leaves
     const restoreIndex = f.calls().findIndex(call => call.includes('restore-volume'));
     assert.ok(buildIndex >= 0 && restoreIndex > buildIndex);
     ok(f.run('auto-deploy.sh', ['--migrate', '--non-interactive'], extra));
-    assert.deepEqual(readFileSync(join(f.volume, 'compensation.sqlite')), before);
+    assert.deepEqual(readFileSync(join(source, 'compensation.sqlite')), before, 'the original ledger must remain unchanged after handoff');
+    const restored = new DatabaseSync(join(f.volume, 'compensation.sqlite'), { readOnly: true });
+    try {
+      assert.equal(restored.prepare('SELECT value FROM marker').get().value, 'old binding ledger');
+      assert.equal(restored.prepare("SELECT value FROM metadata WHERE key='newapi_origin'").get().value, 'https://newapi.example.com');
+    } finally { restored.close(); }
+    assert.deepEqual(readFileSync(join(f.volume, 'secrets.key')), Buffer.alloc(32, 19));
     assert.match(readFileSync(join(f.directory, '.yunxiang-deploy-state'), 'utf8'), /ready/);
   } finally { f.clean(); }
 });

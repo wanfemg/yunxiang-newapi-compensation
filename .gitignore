@@ -6,6 +6,8 @@
 .yunxiang-deploy-state
 .yunxiang-deploy-state.pending
 .yunxiang-config.pending/
+.yunxiang-link.rollback/
+.yunxiang-link.prepare.*/
 compose.generated.json
 compose.generated.json.pending
 docker-compose.yml
