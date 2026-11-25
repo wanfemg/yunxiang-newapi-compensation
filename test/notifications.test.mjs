@@ -19,7 +19,7 @@ test('批量钉钉标题直接体现待审核、审核通过、成功、失败�
     set(status);store.notifyClaimsBatch('title-run');
     const markdown=JSON.parse(store.db.prepare('SELECT body FROM notifications ORDER BY id DESC LIMIT 1').get().body);
     assert.ok(markdown.title.includes(label),markdown.title);
-    assert.match(markdown.text,/已确认补回/);
+    assert.match(markdown.text,/合计补回/);
   }
   set('pending');store.db.prepare("UPDATE claims SET status='failed',updated_at=updated_at+1 WHERE id=?").run(two.id);
   store.notifyClaimsBatch('title-run');
@@ -31,7 +31,7 @@ test('批量钉钉标题直接体现待审核、审核通过、成功、失败�
   const payload=dingtalkPayload({event:'batch_result',body:JSON.stringify(ai)},'https://refund.example.com/');
   assert.equal(payload.msgtype,'actionCard');
   assert.equal(payload.actionCard.singleURL,'https://refund.example.com/');
-  assert.match(payload.actionCard.text,/已确认补回/);
+  assert.match(payload.actionCard.text,/合计补回/);
   assert.doesNotMatch(payload.actionCard.text,/逐笔结果/);
 });
 

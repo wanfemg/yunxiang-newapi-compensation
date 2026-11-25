@@ -1,8 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID, createHash } from 'node:crypto';
 import { defaults, AppError, settlementClock, expectedQuota, fundingSource, compensationLabel, validateRules, limitDetail, nextResetAt, throwLimit } from './rules.mjs';
-import {formatQuota} from '../public/display.js';
 import {notificationTitle,batchNotificationTitle} from './notification-titles.mjs';
+import {modelNotificationText} from './dingtalk-message.mjs';
 
 export class Store {
   constructor(path = ':memory:') {
@@ -259,37 +259,19 @@ export class Store {
   }
   notifyClaim(event,claim,note){
     if(claim.run_id)return;
-    const safe=value=>String(value??'').replace(/[\\`*_{}\[\]()<>#!|@]/g,' ').replace(/[\r\n]+/g,' ').slice(0,500);
     let display;try{display=JSON.parse(this.db.prepare("SELECT value FROM metadata WHERE key='display'").get()?.value);}catch{}
-    const label={pending:'待人工审核',approved:'已通过，等待执行',succeeded:'已补回',failed:'返还失败',unknown:'待人工对账',rejected:'已驳回',executing:'执行中'}[claim.status]||claim.status;
-    const amount=claim.status==='succeeded'?claim.amount:claim.amount||expectedQuota(claim.log,claim.rules);
     const title=notificationTitle(event,claim.status);
-    const text=[
-      ['申请号',claim.id],['用户',claim.username+'（ID '+claim.user_id+'）'],['类型',compensationLabel(claim.log,claim.source)],['模型',claim.log.model_name],['原请求',claim.request_id],['补回额度',display?formatQuota(amount,display):'站点显示配置待同步'],['状态',label],['处理说明',note],['时间',new Date().toLocaleString('zh-CN',{timeZone:this.rules().timezone,hour12:false})]
-    ].map(([key,value])=>'- **'+key+'**：'+safe(value)).join('\n');
-    this.notify(event,JSON.stringify({title,text}));
+    this.notify(event,JSON.stringify({title,layout:'models',text:modelNotificationText([claim],display)}),JSON.stringify([claim.id,claim.status,claim.amount,note]));
   }
   notifyClaimsBatch(runId,owner=null){
     if(owner===null){for(const row of this.db.prepare('SELECT DISTINCT user_id FROM claims WHERE run_id=?').all(runId))this.notifyClaimsBatch(runId,row.user_id);return;}
     const claims=this.db.prepare('SELECT * FROM claims WHERE run_id=? AND user_id=? ORDER BY created_at,id').all(runId,owner).map(row=>this.decode(row));
     if(!claims.length)return;
-    const safe=value=>String(value??'').replace(/[\\`*_{}\[\]()<>#!|@]/g,' ').replace(/[\r\n]+/g,' ').slice(0,300);
-    const labels={pending:'待人工审核',approved:'已通过 · 待执行',executing:'执行中',succeeded:'已补回',failed:'返还失败',unknown:'待人工对账',rejected:'已驳回'};
     let display;try{display=JSON.parse(this.db.prepare("SELECT value FROM metadata WHERE key='display'").get()?.value);}catch{}
-    const succeeded=claims.filter(c=>c.status==='succeeded'),total=succeeded.reduce((sum,c)=>sum+c.amount,0);
     const hasAI=claims.some(claim=>this.db.prepare("SELECT 1 FROM events WHERE claim_id=? AND action IN ('ai_reviewed','admin_ai_reviewed') LIMIT 1").get(claim.id));
     const batch=this.queryBatch(runId),waiting=batch?.status==='waiting_limit';
     const title=waiting?'审核结果 · 补偿暂缓':batchNotificationTitle(claims,hasAI);
-    const rows=claims.map(c=>`- **${safe(c.log.model_name)}** · ${safe(c.request_id)} · ${labels[c.status]||safe(c.status)} · ${display?formatQuota(c.status==='succeeded'?c.amount:expectedQuota(c.log,c.rules),display):c.status==='succeeded'?c.amount:expectedQuota(c.log,c.rules)}${c.review_note?' · '+safe(c.review_note):''}`);
-    const text=[
-      `- **用户**：${safe(claims[0].username)}（ID ${claims[0].user_id}）`,
-      `- **申请笔数 / 模型数**：${claims.length} / ${new Set(claims.map(c=>c.log.model_name)).size}`,
-      `- **已确认补回**：${succeeded.length} 笔 · ${display?formatQuota(total,display):total}`,
-      ...(waiting?[`- **整批处理说明**：${safe(batch.note)}`]:[]),
-      '- **逐笔结果**：',...rows,
-      `- **时间**：${new Date(Math.max(...claims.map(c=>c.updated_at))).toLocaleString('zh-CN',{timeZone:this.rules().timezone,hour12:false})}`
-    ].join('\n');
-    this.notify('batch_result',JSON.stringify({title,text}),JSON.stringify([runId,owner,claims.map(c=>[c.id,c.status,c.amount,c.review_note]),hasAI,waiting?batch.limit:null]));
+    this.notify('batch_result',JSON.stringify({title,layout:'models',text:modelNotificationText(claims,display)}),JSON.stringify([runId,owner,claims.map(c=>[c.id,c.status,c.amount,c.review_note]),hasAI,waiting?batch.limit:null]));
   }
   decode(row) { return row ? { ...row, log: JSON.parse(row.log), rules: JSON.parse(row.rules), limit: row.limit_json ? JSON.parse(row.limit_json) : null } : null; }
   get(id) { return this.decode(this.db.prepare('SELECT * FROM claims WHERE id=?').get(id)); }

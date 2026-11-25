@@ -25,7 +25,10 @@ test('同一提交批次的多模型申请只生成一条完整汇总通知',t=>
   const notices=f.store.db.prepare('SELECT event,body FROM notifications').all();
   assert.equal(notices.length,1);assert.equal(notices[0].event,'batch_result');
   assert.match(notices[0].body,/fixture-model/);assert.match(notices[0].body,/second-model/);
-  assert.match(notices[0].body,/申请笔数 \/ 模型数/);
+  const summary=JSON.parse(notices[0].body);
+  assert.match(summary.text,/合计补回/);
+  assert.equal(summary.text.split('\n').filter(line=>line.startsWith('- **')).length,2);
+  assert.doesNotMatch(summary.text,/batch-a|batch-b|逐笔/);
   assert.equal(f.store.get(first.id).run_id,runId);assert.equal(f.store.get(second.id).run_id,runId);
 });
 test('普通用户不能审核执行或查看别人申请；返回日志不含渠道诊断',async t=>{
