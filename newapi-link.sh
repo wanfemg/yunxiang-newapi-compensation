@@ -159,7 +159,7 @@ yx_rollback_newapi(){
 yx_refresh_newapi(){
   local result item old_url rebind
   docker volume inspect "$volume" >/dev/null 2>&1 || yx_die '已有账本卷缺失；先使用迁移修复恢复账本，未创建空账本。'
-  [[ -s docker-compose.yml ]] || yx_die '缺少原标准编排文件；先运行安装/更新恢复编排，再重新获取关联。'
+  [[ -s docker-compose.yml ]] || yx_die '缺少原标准编排文件；先运行安装或更新恢复编排，再重新获取关联。'
   yx_discover_newapi
   cp -- .env.auto "$link_temp/previous.env"
   cp -- compose.generated.json "$link_temp/previous-compose.json"

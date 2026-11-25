@@ -148,12 +148,15 @@ test('remote menu appears once before the release archive is downloaded', { skip
   try {
     initialized(f);
     const remote = f.remote();
-    const result = f.run('install.sh', [], remote.env, { script: remote.script, interactive: true, input: '1\n' }); ok(result);
+    const before = readFileSync(ledger(f));
+    const result = f.run('install.sh', [], remote.env, { script: remote.script, interactive: true, input: '6\n' }); ok(result);
     const text = output(result);
     const menu = text.indexOf('选择操作 [');
     const download = text.indexOf('下载云响');
     assert.ok(menu >= 0 && download > menu, text);
     assert.equal((text.match(/^选择操作 \[/gm) || []).length, 1, text);
+    assert.match(text, /部署模式：update/);
+    assert.deepEqual(readFileSync(ledger(f)), before);
   } finally { f.clean(); }
 });
 test('a fresh remote bootstrap completes the menu and configuration without a pre-existing ledger', { skip: !bashAvailable }, () => {
@@ -162,6 +165,7 @@ test('a fresh remote bootstrap completes the menu and configuration without a pr
     const remote = f.remote();
     const result = f.run('install.sh', [], { ...remote.env, PUBLIC_ORIGIN: '' }, { script: remote.script, interactive: true, input: '1\n3210\nyx.yzmao.cn\n' }); ok(result);
     assert.equal(existsSync(ledger(f)), true);
+    assert.match(output(result), /部署模式：install/);
     assert.match(readFileSync(join(f.directory, '.env.auto'), 'utf8'), /PUBLIC_ORIGIN=https:\/\/yx\.yzmao\.cn/);
     assert.equal((output(result).match(/^选择操作 \[/gm) || []).length, 1);
   } finally { f.clean(); }

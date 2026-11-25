@@ -13,7 +13,7 @@ Linux 下载式入口（需先将当前源码发布到仓库）：
 bash <(curl -fsSL https://raw.githubusercontent.com/wanfemg/yunxiang-newapi-compensation/main/install.sh)
 ```
 
-入口会先显示安装/更新、迁移修复、重新安装、彻底卸载、重新获取 NewAPI 项目与数据库菜单。首次配置支持裸域名自动补全 HTTPS；失败后重新执行会继续未完成的安装。更新保留数据卷与接入配置，重新安装先无缓存构建再重建容器。无人值守及旧版中断安装的 `--install` 参数见 [一键部署](docs/one-click.md)。
+入口会先显示操作菜单，安装与更新分别为 `1. 安装` 和 `6. 更新`；迁移修复、重新安装、彻底卸载、重新获取 NewAPI 项目与数据库仍对应第 2–5 项。首次配置支持裸域名自动补全 HTTPS；失败后重新执行会继续未完成的安装。更新保留数据卷与接入配置，重新安装先无缓存构建再重建容器。无人值守及旧版中断安装的 `--install` 参数见 [一键部署](docs/one-click.md)。
 
 已部署项目重新识别原站：
 

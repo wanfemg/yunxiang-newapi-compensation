@@ -114,9 +114,9 @@ if [[ $phase == pending && -d $pending_dir ]]; then
 fi
 saved_config=0
 if [[ -s .env.auto && -s compose.generated.json && -s secrets/newapi_database.json ]]; then saved_config=1; fi
-[[ $yx_mode != refresh || $saved_config == 1 ]] || yx_die '重新获取需要已有完整云响接入配置；首次部署选择安装/更新。'
+[[ $yx_mode != refresh || $saved_config == 1 ]] || yx_die '重新获取需要已有完整云响接入配置；首次部署选择 1. 安装。'
 if ((saved_config == 0)); then
-  [[ $yx_mode != migrate && $yx_mode != reinstall ]] || yx_die '未发现完整接入配置；首次安装选择安装/更新，已有部署先导入迁移包。'
+  [[ $yx_mode != migrate && $yx_mode != reinstall ]] || yx_die '未发现完整接入配置；首次安装选择 1. 安装，已有部署先导入迁移包。'
   [[ ! -e .env.auto && ! -e compose.generated.json ]] || yx_die '接入配置不完整，已保留现有文件；未创建空账本。'
   set_phase pending
   yx_discover_newapi

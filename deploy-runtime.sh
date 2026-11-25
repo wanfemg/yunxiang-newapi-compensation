@@ -6,8 +6,9 @@ yx_die(){ printf '%s\n' "$*" >&2; exit 1; }
 yx_help(){
   printf '%s\n' \
     '云响一键部署：bash install.sh [--install|--update|--migrate|--reinstall|--uninstall|--refresh-newapi]' \
-    '默认交互选择：安装/更新、迁移修复、重新安装（保留账本）、彻底卸载、重新获取 NewAPI。' \
+    '交互菜单：1 安装、2 迁移修复、3 重新安装（保留账本）、4 彻底卸载、5 重新获取 NewAPI、6 更新。' \
     '--install / --fresh：明确继续首次安装，不删除任何已有数据。' \
+    '--update：更新云响源码与镜像，保留账本、secrets 和接入配置。' \
     '--refresh-newapi / --rediscover / --reconnect：重新获取 NewAPI 项目、主库、日志库与网络并验证关联。' \
     '--mode install|update|migrate|reinstall|uninstall|refresh：与对应选项等效。' \
     '--non-interactive：不读取终端；卸载另须 --yes 才会删除数据。' \
@@ -79,20 +80,22 @@ yx_select_mode(){
   if ((yx_non_interactive)); then yx_mode=update; return 0; fi
   cat >&2 <<'EOF'
 云响一键部署。请选择操作：
-1. 安装 / 更新（默认）：首次安装、继续未完成安装，或保留账本更新源码
+1. 安装（默认）：首次安装或继续未完成的安装
 2. 迁移修复：恢复导入账本，修复安装路径、数据权限和原站网络
 3. 重新安装：重建云响容器与镜像，保留账本、secrets 和接入配置
 4. 彻底卸载：删除云响容器、镜像、账本、secrets 和安装目录
 5. 重新获取 NewAPI 项目与数据库：重新识别主体、配置文件、网络和主库/日志库，检查关联
+6. 更新：更新云响源码与镜像，保留账本、secrets 和接入配置
 0. 退出
 EOF
-  yx_read '选择操作 [0-5，默认 1]: ' 1
+  yx_read '选择操作 [0-6，默认 1]: ' 1
   case $REPLY in
-    1) yx_mode=update ;;
+    1) yx_mode=install ;;
     2) yx_mode=migrate ;;
     3) yx_mode=reinstall ;;
     4) yx_mode=uninstall ;;
     5) yx_mode=refresh ;;
+    6) yx_mode=update ;;
     0) printf '%s\n' '已退出。'; exit 0 ;;
     *) yx_die '选项无效，未执行操作。' ;;
   esac
